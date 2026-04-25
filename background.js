@@ -153,9 +153,24 @@ function canonicalIndeedUrl(rawUrl) {
   try { parsed = new URL(rawUrl); }
   catch (e) { return null; }
   if (!/(?:^|\.)indeed\.com$/i.test(parsed.hostname)) return null;
-  const jk = parsed.searchParams.get('jk');
-  if (!jk) return null;
-  return 'https://www.indeed.com/viewjob?jk=' + encodeURIComponent(jk);
+  // Two URL shapes carry the job id:
+  //   1. /viewjob?jk=<id>          direct posting page
+  //   2. /jobs?...&vjk=<id>        search-results page with a selected card
+  //      /m/jobs?...&vjk=<id>      mobile search-results variant
+  // jk and vjk are the same hash (vjk = "viewed job key") so both flows
+  // collapse to the same canonical sourceUrl and dedupe across each other.
+  let id = parsed.searchParams.get('jk');
+  if (!id) {
+    const onJobsPath =
+      parsed.pathname === '/jobs'   || parsed.pathname.startsWith('/jobs/')   ||
+      parsed.pathname === '/m/jobs' || parsed.pathname.startsWith('/m/jobs/');
+    if (onJobsPath) id = parsed.searchParams.get('vjk');
+  }
+  // Indeed ids are 16 hex characters in practice; accept any alphanumeric
+  // string defensively. Reject empty / punctuation / encoded values so we
+  // don't poison rr_job_* with an unstable canonical form.
+  if (!id || !/^[A-Za-z0-9]+$/.test(id)) return null;
+  return 'https://www.indeed.com/viewjob?jk=' + id;
 }
 
 // Save flow for content-script-driven sources (Lever, Indeed). Mirrors the

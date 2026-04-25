@@ -56,9 +56,29 @@ async function boot() {
   try {
     const next = await rehydrate();
     setState(next);
+    // Wave 0 task 7: ask the service worker to consider capturing the
+    // currently-active tab. The SW does the URL check, dedupe, storage
+    // write, and posts rr_set_state back with any applicable notice.
+    requestActiveTabCapture();
   } catch (err) {
     console.error('[sidepanel] rehydrate failed', err);
     setState(STATES.ERROR, STRINGS.state.error.msg);
+  }
+}
+
+// Note: capture roundtrip completes after the initial setState(READY).
+// Tracker rendering (task 9) must re-read storage on rr_set_state with notice,
+// not assume ready means "panel knows current storage state".
+async function requestActiveTabCapture() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || tab.id == null) return;
+    // Fire-and-forget. The SW replies via the rr_set_state listener above.
+    chrome.runtime
+      .sendMessage({ type: 'rr_capture_active_tab', tabId: tab.id })
+      .catch(() => {});
+  } catch (err) {
+    console.error('[sidepanel] active tab query failed', err);
   }
 }
 

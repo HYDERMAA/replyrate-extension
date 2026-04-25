@@ -1,24 +1,16 @@
-// Detect which job board we're on, extract details
+// Detect which job board we're on, extract details.
+// Wave 0 task 7: linkedin removed from BOARD detection. The static
+// content_scripts manifest entry no longer matches linkedin.com, but the
+// belt-and-braces guard here means the script stays inert on linkedin even
+// if it's ever loaded via programmatic registration in task 6.
 const BOARD = (() => {
   const h = location.hostname;
-  if (/linkedin\.com/.test(h)) return 'linkedin';
   if (/indeed\./.test(h)) return 'indeed';
   if (/lever\.co/.test(h)) return 'lever';
   return null;
 })();
 
 const EXTRACTORS = {
-  linkedin: () => ({
-    company: document.querySelector('.job-details-jobs-unified-top-card__company-name a')?.textContent?.trim()
-            || document.querySelector('.topcard__flavor a')?.textContent?.trim(),
-    role: document.querySelector('.job-details-jobs-unified-top-card__job-title h1')?.textContent?.trim()
-          || document.querySelector('.topcard__title')?.textContent?.trim(),
-    location: document.querySelector('.job-details-jobs-unified-top-card__bullet')?.textContent?.trim()
-             || document.querySelector('.topcard__flavor--bullet')?.textContent?.trim(),
-    description: document.querySelector('.jobs-description__content')?.innerText?.trim()
-               || document.querySelector('.description__text')?.innerText?.trim(),
-    url: location.href.split('?')[0],
-  }),
   indeed: () => ({
     company: document.querySelector('[data-testid="inlineHeader-companyName"] a')?.textContent?.trim()
             || document.querySelector('.jobsearch-CompanyInfoContainer')?.innerText?.split('\n')[0]?.trim(),

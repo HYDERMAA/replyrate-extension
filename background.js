@@ -16,8 +16,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 async function handleSave(job) {
-  // Persist full JD (including description — too big for URL) to chrome.storage
-  // so the SPA's apIngestFromExtension drain picks it up on arrival.
+  // Persist full JD (including description, which is too big for URL) to
+  // chrome.storage so the SPA's apIngestFromExtension drain picks it up.
   await chrome.storage.local.set({ ['rr-pending-' + Date.now()]: job });
 
   const params = new URLSearchParams({
@@ -29,7 +29,7 @@ async function handleSave(job) {
   });
   const targetUrl = `https://replyrate.ai/?aud=jobs&${params.toString()}#apps`;
 
-  // Reuse an existing ReplyRate tab if one is open — avoids accumulating
+  // Reuse an existing ReplyRate tab if one is open, to avoid accumulating
   // a new tab on every save. Prefer the most-recently-queried match.
   const existingTabs = await chrome.tabs.query({ url: 'https://replyrate.ai/*' });
 

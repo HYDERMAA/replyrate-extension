@@ -19,16 +19,32 @@ function newJobLeadId() {
 
 // Reduce a LinkedIn job URL to its canonical form:
 //   'https://www.linkedin.com/jobs/view/<id>/'
-// Strips query, fragment, and any trailing path beyond the numeric job id.
-// Returns null when the URL is not a LinkedIn job page (feed, search, etc.).
+// Handles three URL shapes:
+//   1. https://www.linkedin.com/jobs/view/<digits>/... (direct view page)
+//   2. https://www.linkedin.com/jobs/collections/...?currentJobId=<digits>
+//   3. https://www.linkedin.com/jobs/search/...?currentJobId=<digits>
+// Returns null for /feed/, bare /jobs/, /jobs/collections/recommended/ with
+// no currentJobId, malformed URLs, and any other LinkedIn URL.
 function canonicalLinkedInJobUrl(rawUrl) {
   if (!rawUrl) return null;
-  const m = rawUrl.match(/^https:\/\/(?:www\.)?linkedin\.com\/jobs\/view\/(\d+)/i);
-  return m ? 'https://www.linkedin.com/jobs/view/' + m[1] + '/' : null;
+  // Fast path: /jobs/view/<digits> (with or without trailing slash and noise).
+  const direct = rawUrl.match(/^https:\/\/(?:www\.)?linkedin\.com\/jobs\/view\/(\d+)/i);
+  if (direct) return 'https://www.linkedin.com/jobs/view/' + direct[1] + '/';
+  // Collections and search list pages carry the active job in ?currentJobId.
+  let parsed;
+  try { parsed = new URL(rawUrl); }
+  catch (e) { return null; }
+  if (!/(?:^|\.)linkedin\.com$/i.test(parsed.hostname)) return null;
+  if (!parsed.pathname.startsWith('/jobs/collections/') &&
+      !parsed.pathname.startsWith('/jobs/search/')) {
+    return null;
+  }
+  const id = parsed.searchParams.get('currentJobId');
+  if (!id || !/^\d+$/.test(id)) return null;
+  return 'https://www.linkedin.com/jobs/view/' + id + '/';
 }
 
 async function captureActiveTabIfEligible(tabId) {
-  console.log('[capture] start, tabId:', tabId);
   if (tabId == null) { pushPanelState('ready'); return; }
 
   let tab;
@@ -38,11 +54,9 @@ async function captureActiveTabIfEligible(tabId) {
     pushPanelState('ready');
     return;
   }
-  console.log('[capture] tab fetched, url:', tab && tab.url, 'title:', tab && tab.title);
 
   const url = tab && tab.url;
   const isLinkedIn = url && /^https:\/\/(?:www\.)?linkedin\.com\//i.test(url);
-  console.log('[capture] isLinkedIn:', isLinkedIn);
   if (!isLinkedIn) {
     // Non-LinkedIn tab. Other source types land in tasks 6 and 8.
     pushPanelState('ready');
@@ -50,7 +64,6 @@ async function captureActiveTabIfEligible(tabId) {
   }
 
   const canonicalUrl = canonicalLinkedInJobUrl(url);
-  console.log('[capture] canonicalUrl:', canonicalUrl);
   if (!canonicalUrl) {
     // On linkedin.com but not on /jobs/view/<id>. No capture, but tell the
     // panel why so the UI (when wired) can explain what to click instead.
@@ -66,7 +79,6 @@ async function captureActiveTabIfEligible(tabId) {
   );
 
   if (dupeKey) {
-    console.log('[capture] dupe found, key:', dupeKey);
     // Touch lastActionAt so the panel can sort by recency without changing
     // createdAt. Skip writing a duplicate JobLead.
     const existing = all[dupeKey];
@@ -93,9 +105,7 @@ async function captureActiveTabIfEligible(tabId) {
     lastActionAt: now,
     nextActionAt: null,
   };
-  console.log('[capture] writing new JobLead:', id, jobLead.sourceUrl);
   await chrome.storage.local.set({ ['rr_job_' + id]: jobLead });
-  console.log('[capture] write complete');
   pushPanelState('ready');
 }
 
@@ -127,11 +137,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true; // async response
   }
   // Message contract (panel -> background):
-  //   { type: 'rr_capture_active_tab', tabId }
-  // Reply path is the rr_set_state broadcast above, not sendResponse, so
-  // we return undefined here (port closes immediately).
+  //   request:  { type: 'rr_capture_active_tab', tabId }
+  //   response: { accepted: true } sent synchronously
+  // The actual capture result flows back via the rr_set_state broadcast
+  // (with optional notice). The sync ack stops Chrome from logging
+  // "message port closed before a response was received" when the panel's
+  // sendMessage promise outlives our async capture work.
   if (msg.type === 'rr_capture_active_tab') {
-    console.log('[capture] message received, tabId:', msg.tabId);
+    sendResponse({ accepted: true });
     captureActiveTabIfEligible(msg.tabId).catch((err) => {
       console.error('[background] captureActiveTabIfEligible failed', err);
       pushPanelState('ready');

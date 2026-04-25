@@ -1,3 +1,10 @@
+// Wave 0 task 4: toolbar icon opens the side panel everywhere (including
+// LinkedIn, where there is no on-page injection per task 7). Runs on every
+// service-worker wake; setPanelBehavior is idempotent.
+chrome.sidePanel
+  .setPanelBehavior({ openPanelOnActionClick: true })
+  .catch((err) => console.error('[background] setPanelBehavior failed', err));
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'SAVE_JOB') {
     handleSave(msg.job).then(

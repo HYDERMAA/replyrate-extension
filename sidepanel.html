@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReplyRate</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --surface: #f6f5f8;
+    --text: #1a1614;
+    --text-muted: #6b6878;
+    --border: #e7e4ec;
+    --accent: #7c5dff;
+    --accent-text: #ffffff;
+    --error: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15131a;
+      --surface: #1e1b24;
+      --text: #f3f1f7;
+      --text-muted: #9b97a6;
+      --border: #2c2935;
+      --error: #ff6b5b;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.45;
+    display: flex;
+    flex-direction: column;
+  }
+  .rr-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .rr-brand { display: flex; align-items: center; gap: 10px; }
+  .rr-logo {
+    width: 28px; height: 28px;
+    display: grid; place-items: center;
+    background: var(--accent);
+    color: var(--accent-text);
+    border-radius: 8px;
+    font-weight: 700;
+    font-size: 14px;
+  }
+  .rr-title { margin: 0; font-size: 14px; font-weight: 600; }
+  .rr-state-pill {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+  }
+  .rr-main { flex: 1; padding: 20px 16px; overflow-y: auto; }
+  .rr-state { display: none; flex-direction: column; gap: 12px; align-items: flex-start; }
+  body[data-state="loading"]   .rr-state[data-show-on="loading"],
+  body[data-state="collapsed"] .rr-state[data-show-on="collapsed"],
+  body[data-state="ready"]     .rr-state[data-show-on="ready"],
+  body[data-state="error"]     .rr-state[data-show-on="error"] { display: flex; }
+  .rr-state-msg { margin: 0; color: var(--text-muted); }
+  .rr-state-error .rr-state-msg { color: var(--error); }
+  .rr-btn {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    padding: 8px 14px;
+    border-radius: 8px;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .rr-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .rr-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .rr-spinner {
+    width: 18px; height: 18px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: rr-spin 0.8s linear infinite;
+  }
+  @keyframes rr-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    .rr-spinner { animation-duration: 2s; }
+  }
+</style>
+</head>
+<body data-state="loading">
+  <header class="rr-header">
+    <div class="rr-brand">
+      <div class="rr-logo" aria-hidden="true">R</div>
+      <h1 class="rr-title" data-i18n="brand.name">ReplyRate</h1>
+    </div>
+    <span class="rr-state-pill" id="rr-state-pill" aria-live="polite">Loading</span>
+  </header>
+
+  <main class="rr-main">
+    <section class="rr-state rr-state-loading" data-show-on="loading" aria-busy="true">
+      <div class="rr-spinner" aria-hidden="true"></div>
+      <p class="rr-state-msg" data-i18n="state.loading.msg">Loading your workspace</p>
+    </section>
+
+    <section class="rr-state rr-state-collapsed" data-show-on="collapsed">
+      <p class="rr-state-msg" data-i18n="state.collapsed.msg">Panel is idle. Open a supported job page to get started.</p>
+      <button class="rr-btn" id="rr-expand-btn" data-i18n="state.collapsed.action">Expand</button>
+    </section>
+
+    <section class="rr-state rr-state-ready" data-show-on="ready">
+      <p class="rr-state-msg" data-i18n="state.ready.msg">Workspace ready. Tracker UI ships in the next wave.</p>
+    </section>
+
+    <section class="rr-state rr-state-error" data-show-on="error" role="alert">
+      <p class="rr-state-msg" id="rr-error-msg" data-i18n="state.error.msg">Something went wrong loading the panel.</p>
+      <button class="rr-btn" id="rr-retry-btn" data-i18n="state.error.action">Retry</button>
+    </section>
+  </main>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

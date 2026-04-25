@@ -56,7 +56,7 @@ function injectButton() {
       <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M6 2l4 4 8-8"/></svg>
       Save to ReplyRate
     </button>
-    <div class="rr-save-btn-hint">Prep CV, cover letter, interview — from this one click</div>
+    <div class="rr-save-btn-hint">Prep CV, cover letter, and interview from this one click</div>
   `;
   document.body.appendChild(btn);
 
@@ -64,7 +64,7 @@ function injectButton() {
     const job = extractJob();
     chrome.runtime.sendMessage({ type: 'SAVE_JOB', job }, (res) => {
       if (res?.ok) {
-        btn.querySelector('.rr-save-btn-primary').textContent = '✓ Saved — open ReplyRate';
+        btn.querySelector('.rr-save-btn-primary').textContent = '✓ Saved, open ReplyRate';
         btn.querySelector('.rr-save-btn-primary').addEventListener('click', () => {
           window.open('https://replyrate.ai/?aud=jobs#apps', '_blank');
         }, { once: true });

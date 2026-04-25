@@ -1,3 +1,46 @@
+// =============================================================================
+// MESSAGE CONTRACT (Wave 0 task 5)
+// =============================================================================
+// Every cross-context message used by the extension is documented below.
+// Adding a new message type is a two-line change: a new entry in this block
+// AND a new row in MESSAGE_HANDLERS at the bottom of this file.
+//
+// Direction legend:
+//   bg = background service worker
+//   sp = side panel
+//   cs = content script (Lever, Indeed; LinkedIn no longer injects per task 7)
+//
+// 1. rr_set_state                                         direction: bg -> sp
+//    request:  { type: 'rr_set_state', state, error?, notice? }
+//      state  = 'collapsed' | 'loading' | 'ready' | 'error'
+//      error  = human-readable string when state === 'error'
+//      notice = optional i18n key, e.g. 'rr_notice_not_a_job_page',
+//               'rr_notice_already_saved' (panel rendering deferred)
+//    response: none (broadcast, fire-and-forget)
+//    sender:   bg only. Use pushPanelState() or pushPanelEvent('state', ...).
+//
+// 2. rr_capture_active_tab                                direction: sp -> bg
+//    request:  { type: 'rr_capture_active_tab', tabId: number }
+//    response: { accepted: true } sent synchronously. Capture result follows
+//              later via an rr_set_state broadcast.
+//    sender:   sp only.   responseStyle: sync_ack
+//
+// 3. SAVE_JOB                                             direction: cs -> bg
+//    request:  { type: 'SAVE_JOB',
+//                sourceType: 'lever' | 'indeed',
+//                title: string,
+//                rawUrl: string }
+//    response: { ok: true, id: string, deduped?: true }
+//              | { ok: false, error: string }
+//    sender:   cs only (requires sender.tab.id).   responseStyle: async
+//    SAVE_JOB requires a tab sender by design. Future flows that need to save
+//    a job from a non-tab context (manual URL paste, side-panel "add job"
+//    button, etc.) should use a new message type, not overload SAVE_JOB.
+//
+// Future events from bg -> sp (capture_complete, save_complete, ...) go
+// through pushPanelEvent so call sites do not need to know the wire format.
+// =============================================================================
+
 // Wave 0 task 4: toolbar icon opens the side panel everywhere (including
 // LinkedIn, where there is no on-page injection per task 7). Runs on every
 // service-worker wake; setPanelBehavior is idempotent.
@@ -109,14 +152,9 @@ async function captureActiveTabIfEligible(tabId) {
   pushPanelState('ready');
 }
 
-// Message contract (background -> panel):
-//   { type: 'rr_set_state', state, error?, notice? }
-//   state  - 'collapsed' | 'loading' | 'ready' | 'error'
-//   error  - human-readable string when state === 'error'
-//   notice - optional i18n key for a non-blocking informational message,
-//            e.g. 'rr_notice_not_a_job_page', 'rr_notice_already_saved'.
-//            Panel rendering of notices is deferred (Option A); the field
-//            is sent today so devtools and future panel UI can observe it.
+// rr_set_state broadcaster. See contract block at top of file. Prefer
+// pushPanelEvent('state', { state, error, notice }) at new call sites so
+// future event types can be added without churning every caller.
 function pushPanelState(state, error, notice) {
   // Fire-and-forget. The panel may not be listening yet if it just opened;
   // its own boot() will land in 'ready' independently.
@@ -126,6 +164,22 @@ function pushPanelState(state, error, notice) {
     if (notice) msg.notice = notice;
     chrome.runtime.sendMessage(msg).catch(() => {});
   } catch (e) { /* ignore */ }
+}
+
+// Generalized bg -> sp event broadcast. Wraps pushPanelState today; future
+// Wave 1/2 events ('capture_complete', 'save_complete', ...) get added here
+// without touching call sites that only need state changes.
+function pushPanelEvent(eventType, payload) {
+  switch (eventType) {
+    case 'state': {
+      // payload: { state, error?, notice? }
+      const p = payload || {};
+      pushPanelState(p.state, p.error, p.notice);
+      return;
+    }
+    default:
+      console.warn('[messages] unknown panel event type:', eventType);
+  }
 }
 
 // Reduce a Lever job URL to its canonical form by stripping query/fragment.
@@ -224,37 +278,62 @@ async function saveFromContentScript(msg) {
   return { ok: true, id };
 }
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === 'SAVE_JOB') {
-    // Open synchronously: the content-script user-gesture decays during the
-    // async storage work below, so a post-write open() typically fails.
-    if (sender && sender.tab && sender.tab.id != null) {
-      chrome.sidePanel
-        .open({ tabId: sender.tab.id })
-        .catch((err) => console.warn('[save-flow] sidePanel.open failed', err));
+// ---- Message handlers ------------------------------------------------------
+// Each handler matches its dispatch-table responseStyle:
+//   responseStyle: 'async'    => handler must call sendResponse later via a
+//                                promise; the dispatcher returns true so the
+//                                port stays open.
+//   responseStyle: 'sync_ack' => handler must call sendResponse({accepted:true})
+//                                synchronously, then kick off async work; the
+//                                dispatcher returns false. Real result flows
+//                                back via pushPanelEvent broadcasts.
+
+function handleSaveJob(msg, sender, sendResponse) {
+  // Open synchronously: the content-script user-gesture decays during the
+  // async storage work below, so a post-write open() typically fails. The
+  // dispatcher's requiresTabSender:true gate means sender.tab.id is set.
+  chrome.sidePanel
+    .open({ tabId: sender.tab.id })
+    .catch((err) => console.warn('[save-flow] sidePanel.open failed', err));
+  saveFromContentScript(msg).then(
+    (res) => sendResponse(res),
+    (err) => {
+      console.error('[background] saveFromContentScript failed', err);
+      sendResponse({ ok: false, error: (err && err.message) || 'unknown_error' });
     }
-    saveFromContentScript(msg).then(
-      (res) => sendResponse(res),
-      (err) => {
-        console.error('[background] saveFromContentScript failed', err);
-        sendResponse({ ok: false, error: (err && err.message) || 'unknown_error' });
-      }
-    );
-    return true; // async response
-  }
-  // Message contract (panel -> background):
-  //   request:  { type: 'rr_capture_active_tab', tabId }
-  //   response: { accepted: true } sent synchronously
-  // The actual capture result flows back via the rr_set_state broadcast
-  // (with optional notice). The sync ack stops Chrome from logging
-  // "message port closed before a response was received" when the panel's
-  // sendMessage promise outlives our async capture work.
-  if (msg.type === 'rr_capture_active_tab') {
-    sendResponse({ accepted: true });
-    captureActiveTabIfEligible(msg.tabId).catch((err) => {
-      console.error('[background] captureActiveTabIfEligible failed', err);
-      pushPanelState('ready');
-    });
+  );
+}
+
+function handleCaptureActiveTab(msg, sender, sendResponse) {
+  sendResponse({ accepted: true });
+  captureActiveTabIfEligible(msg.tabId).catch((err) => {
+    console.error('[background] captureActiveTabIfEligible failed', err);
+    pushPanelEvent('state', { state: 'ready' });
+  });
+}
+
+// ---- Dispatch table --------------------------------------------------------
+// Single source of truth for "what message types do we accept and how".
+// Append a row here when adding a new type; the contract block at the top of
+// this file must list it too.
+const MESSAGE_HANDLERS = {
+  SAVE_JOB:              { responseStyle: 'async',    requiresTabSender: true,  handler: handleSaveJob },
+  rr_capture_active_tab: { responseStyle: 'sync_ack', requiresTabSender: false, handler: handleCaptureActiveTab },
+};
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  const entry = msg && MESSAGE_HANDLERS[msg.type];
+  if (!entry) return false;
+  if (entry.requiresTabSender && !(sender && sender.tab && sender.tab.id != null)) {
+    try { sendResponse({ ok: false, error: 'requires_tab_sender' }); } catch (_) {}
     return false;
   }
+  try {
+    entry.handler(msg, sender, sendResponse);
+  } catch (err) {
+    console.error('[messages] handler threw for', msg.type, err);
+    try { sendResponse({ ok: false, error: 'handler_threw' }); } catch (_) {}
+    return false;
+  }
+  return entry.responseStyle === 'async';
 });

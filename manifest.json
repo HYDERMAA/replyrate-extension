@@ -1,20 +1,24 @@
 {
   "manifest_version": 3,
   "name": "ReplyRate - Save jobs & prep for UK interviews",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Save jobs from LinkedIn, Indeed, and Lever to your ReplyRate dashboard. Check UK visa sponsorship, generate tailored CVs and cover letters, practice live mock interviews.",
   "permissions": [
     "storage",
     "activeTab",
     "scripting",
-    "tabs"
+    "tabs",
+    "sidePanel"
   ],
   "host_permissions": [
     "https://www.linkedin.com/*",
-    "https://www.indeed.com/*",
-    "https://uk.indeed.com/*",
-    "https://jobs.lever.co/*",
     "https://replyrate.ai/*"
+  ],
+  "optional_host_permissions": [
+    "https://*.lever.co/*",
+    "https://*.greenhouse.io/*",
+    "https://*.myworkdayjobs.com/*",
+    "https://*.indeed.com/*"
   ],
   "background": {
     "service_worker": "background.js",

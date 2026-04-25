@@ -128,11 +128,102 @@ function pushPanelState(state, error, notice) {
   } catch (e) { /* ignore */ }
 }
 
+// Reduce a Lever job URL to its canonical form by stripping query/fragment.
+// Lever URLs look like https://jobs.lever.co/<company>/<job-id> with optional
+// ?source=... tracking params. Path uniquely identifies the posting; we keep
+// the full path including any /apply suffix that Lever sometimes appends.
+function canonicalLeverUrl(rawUrl) {
+  if (!rawUrl) return null;
+  let parsed;
+  try { parsed = new URL(rawUrl); }
+  catch (e) { return null; }
+  if (!/(?:^|\.)lever\.co$/i.test(parsed.hostname)) return null;
+  return parsed.origin + parsed.pathname;
+}
+
+// Reduce an Indeed job URL to its canonical form. Indeed serves the same
+// posting under many hosts (uk.indeed.com, www.indeed.com), via /viewjob and
+// /jobs?jk= shapes, with an unbounded set of tracking params. The jk hash is
+// the stable id, so we collapse everything to:
+//   https://www.indeed.com/viewjob?jk=<id>
+// Returns null when no jk param is present (search results lists, etc.).
+function canonicalIndeedUrl(rawUrl) {
+  if (!rawUrl) return null;
+  let parsed;
+  try { parsed = new URL(rawUrl); }
+  catch (e) { return null; }
+  if (!/(?:^|\.)indeed\.com$/i.test(parsed.hostname)) return null;
+  const jk = parsed.searchParams.get('jk');
+  if (!jk) return null;
+  return 'https://www.indeed.com/viewjob?jk=' + encodeURIComponent(jk);
+}
+
+// Save flow for content-script-driven sources (Lever, Indeed). Mirrors the
+// LinkedIn flow in captureActiveTabIfEligible: dedupe by canonical sourceUrl,
+// touch lastActionAt on hit, write a fresh JobLead on miss. Returns the
+// content-script-friendly result envelope:
+//   { ok: true, id }                  fresh write
+//   { ok: true, id, deduped: true }   existing record bumped
+//   { ok: false, error: <code> }      validation failure, no write
+async function saveFromContentScript(msg) {
+  const sourceType = msg && msg.sourceType;
+  const canonicalize =
+    sourceType === 'lever'  ? canonicalLeverUrl  :
+    sourceType === 'indeed' ? canonicalIndeedUrl :
+    null;
+  if (!canonicalize) return { ok: false, error: 'unknown_source' };
+
+  const canonicalUrl = canonicalize(msg.rawUrl);
+  if (!canonicalUrl) return { ok: false, error: 'invalid_url' };
+
+  const all = await chrome.storage.local.get(null);
+  const dupeKey = Object.keys(all).find(
+    (k) => k.indexOf('rr_job_') === 0 && all[k] && all[k].sourceUrl === canonicalUrl
+  );
+
+  if (dupeKey) {
+    const existing = all[dupeKey];
+    existing.lastActionAt = Date.now();
+    await chrome.storage.local.set({ [dupeKey]: existing });
+    return { ok: true, id: existing.id, deduped: true };
+  }
+
+  const id = newJobLeadId();
+  const now = Date.now();
+  const jobLead = {
+    id,
+    title: (msg.title || '').toString(),
+    company: null,
+    location: null,
+    sourceType,
+    sourceUrl: canonicalUrl,
+    salaryText: null,
+    descriptionHash: null,
+    fitBand: null,
+    stage: 'saved',
+    createdAt: now,
+    lastActionAt: now,
+    nextActionAt: null,
+  };
+  await chrome.storage.local.set({ ['rr_job_' + id]: jobLead });
+  return { ok: true, id };
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'SAVE_JOB') {
-    handleSave(msg.job).then(
-      (res) => sendResponse({ ok: true, ...res }),
-      (err) => sendResponse({ ok: false, error: err.message })
+    // Open synchronously: the content-script user-gesture decays during the
+    // async storage work below, so a post-write open() typically fails.
+    if (sender && sender.tab && sender.tab.id != null) {
+      chrome.sidePanel
+        .open({ tabId: sender.tab.id })
+        .catch((err) => console.warn('[save-flow] sidePanel.open failed', err));
+    }
+    saveFromContentScript(msg).then(
+      (res) => sendResponse(res),
+      (err) => {
+        console.error('[background] saveFromContentScript failed', err);
+        sendResponse({ ok: false, error: (err && err.message) || 'unknown_error' });
+      }
     );
     return true; // async response
   }
@@ -152,34 +243,3 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 });
-
-async function handleSave(job) {
-  // Persist full JD (including description, which is too big for URL) to
-  // chrome.storage so the SPA's apIngestFromExtension drain picks it up.
-  await chrome.storage.local.set({ ['rr-pending-' + Date.now()]: job });
-
-  const params = new URLSearchParams({
-    rr_save: '1',
-    company: job.company,
-    role: job.role,
-    url: job.url,
-    location: job.location || '',
-  });
-  const targetUrl = `https://replyrate.ai/?aud=jobs&${params.toString()}#apps`;
-
-  // Reuse an existing ReplyRate tab if one is open, to avoid accumulating
-  // a new tab on every save. Prefer the most-recently-queried match.
-  const existingTabs = await chrome.tabs.query({ url: 'https://replyrate.ai/*' });
-
-  if (existingTabs.length > 0) {
-    const tab = existingTabs[existingTabs.length - 1];
-    await chrome.tabs.update(tab.id, { url: targetUrl, active: true });
-    if (tab.windowId) {
-      try { await chrome.windows.update(tab.windowId, { focused: true }); } catch (e) {}
-    }
-  } else {
-    await chrome.tabs.create({ url: targetUrl });
-  }
-
-  return { saved: true };
-}

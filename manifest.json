@@ -11,8 +11,7 @@
     "sidePanel"
   ],
   "host_permissions": [
-    "https://www.linkedin.com/*",
-    "https://replyrate.ai/*"
+    "https://www.linkedin.com/*"
   ],
   "optional_host_permissions": [
     "https://*.lever.co/*",

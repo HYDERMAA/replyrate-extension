@@ -60,18 +60,32 @@ function injectButton() {
   `;
   document.body.appendChild(btn);
 
-  btn.querySelector('.rr-save-btn-primary').addEventListener('click', async () => {
-    const job = extractJob();
-    chrome.runtime.sendMessage({ type: 'SAVE_JOB', job }, (res) => {
-      if (res?.ok) {
-        btn.querySelector('.rr-save-btn-primary').textContent = '✓ Saved, open ReplyRate';
-        btn.querySelector('.rr-save-btn-primary').addEventListener('click', () => {
-          window.open('https://replyrate.ai/?aud=jobs#apps', '_blank');
-        }, { once: true });
-      } else {
-        btn.querySelector('.rr-save-btn-hint').textContent = 'Error: ' + (res?.error || 'Try again');
+  // Captured once at mount so we can restore the SVG + label cleanly after
+  // the brief success flash (avoids a double-click race that would otherwise
+  // overwrite "originalText" with "Saved" and never recover).
+  const primary = btn.querySelector('.rr-save-btn-primary');
+  const hint = btn.querySelector('.rr-save-btn-hint');
+  const primaryOriginalHtml = primary.innerHTML;
+
+  primary.addEventListener('click', () => {
+    const fresh = extractJob();
+    if (!fresh) return;
+    chrome.runtime.sendMessage(
+      {
+        type: 'SAVE_JOB',
+        sourceType: BOARD,            // 'lever' or 'indeed'
+        title: fresh.role,            // current extractor's role field is the job title
+        rawUrl: window.location.href, // background canonicalises per source
+      },
+      (res) => {
+        if (res && res.ok) {
+          primary.textContent = res.deduped ? '✓ Already saved' : '✓ Saved';
+          setTimeout(() => { primary.innerHTML = primaryOriginalHtml; }, 1500);
+        } else {
+          hint.textContent = 'Error: ' + ((res && res.error) || 'Try again');
+        }
       }
-    });
+    );
   });
 }
 

@@ -74,6 +74,19 @@ const STRINGS = {
       heading: 'No jobs saved yet',
       body:    'Click the ReplyRate icon on a LinkedIn, Lever, or Indeed job page to save it.',
     },
+    // Wave 1 task 9 part 3: row + time copy. Single source-name mapping
+    // (full names) used for both visible badge text and accessible name.
+    row: {
+      sourceLabels: { linkedin: 'LinkedIn', lever: 'Lever', indeed: 'Indeed' },
+    },
+    time: {
+      justNow:    'Just now',
+      minutesAgo: (n) => n + 'm ago',
+      hoursAgo:   (n) => n + 'h ago',
+      yesterday:  'Yesterday',
+      daysAgo:    (n) => n + ' days ago',
+      monthsShort: ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],
+    },
   },
 };
 
@@ -339,6 +352,179 @@ function renderTrackerSkeleton(parent) {
   return root;
 }
 
+// ── Wave 1 task 9 part 3: time formatting + source domain extraction ──────
+
+const ABS_TIME_FORMAT = new Intl.DateTimeFormat(undefined, {
+  year: 'numeric', month: 'short', day: 'numeric',
+  hour: 'numeric', minute: '2-digit',
+});
+function formatAbsoluteTime(ts) { return ABS_TIME_FORMAT.format(new Date(ts)); }
+
+function formatRelativeTime(ts, now) {
+  const T = STRINGS.tracker.time;
+  const nowMs = now == null ? Date.now() : now;
+  const diff = Math.max(0, nowMs - ts);
+  if (diff < 60000)             return T.justNow;
+  if (diff < 60 * 60000)        return T.minutesAgo(Math.floor(diff / 60000));
+  if (diff < 24 * 60 * 60000)   return T.hoursAgo(Math.floor(diff / (60 * 60000)));
+  if (diff < 48 * 60 * 60000)   return T.yesterday;
+  if (diff < 7 * 24 * 60 * 60000) return T.daysAgo(Math.floor(diff / (24 * 60 * 60000)));
+  const d = new Date(ts);
+  const nowD = new Date(nowMs);
+  const month = T.monthsShort[d.getMonth()];
+  return d.getFullYear() === nowD.getFullYear()
+    ? month + ' ' + d.getDate()
+    : month + ' ' + d.getDate() + ', ' + d.getFullYear();
+}
+
+function sourceDomain(url) {
+  try { return new URL(url).hostname.replace(/^www\./i, ''); }
+  catch (e) { return ''; }
+}
+
+// JobRow: one entry in the list. Returns { unmount, update(jobLead, isNew) }.
+// update() is wired now for commit 5 (optimistic stage change); commit 3
+// only calls the constructor and unmount via JobList's full re-render path.
+function JobRow(parent, jobLead, options) {
+  options = options || {};
+
+  const root = document.createElement('div');
+  root.className = 'rr-row' + (options.isNew ? ' rr-row-new' : '');
+  root.setAttribute('role', 'link');
+  root.tabIndex = 0;
+  root.dataset.jobId = jobLead.id;
+
+  const badge = document.createElement('span');
+  badge.className = 'rr-source-badge';
+  root.appendChild(badge);
+
+  const body = document.createElement('div');
+  body.className = 'rr-row-body';
+  const titleEl = document.createElement('div');
+  titleEl.className = 'rr-row-title';
+  const companyEl = document.createElement('div');
+  companyEl.className = 'rr-row-company';
+  const metaEl = document.createElement('div');
+  metaEl.className = 'rr-row-meta';
+  body.appendChild(titleEl);
+  body.appendChild(companyEl);
+  body.appendChild(metaEl);
+  root.appendChild(body);
+
+  const stageChip = document.createElement('span');
+  stageChip.className = 'rr-row-stage';
+  root.appendChild(stageChip);
+
+  function paint(j) {
+    // Source badge. Visible text is the accessible name; no aria-label set.
+    // Spec deviation from line 165 (was: aria-label "From X"); flagged in
+    // commit message for Wave 4 task 36 audit.
+    const sourceType = j.sourceType || 'unknown';
+    const fullName = STRINGS.tracker.row.sourceLabels[sourceType];
+    badge.dataset.source = fullName ? sourceType : 'unknown';
+    badge.textContent = fullName || (sourceType ? sourceType.replace(/^./, c => c.toUpperCase()) : 'Unknown');
+
+    // Title (fallback when missing).
+    titleEl.textContent = j.title || '(untitled)';
+
+    // Company or source-domain fallback.
+    companyEl.textContent = j.company || sourceDomain(j.sourceUrl || '') || '';
+
+    // Meta: location + time, joined by middle dot when both present.
+    metaEl.textContent = '';
+    if (j.location) {
+      const loc = document.createElement('span');
+      loc.className = 'rr-row-location';
+      loc.textContent = j.location;
+      metaEl.appendChild(loc);
+      const sep = document.createElement('span');
+      sep.className = 'rr-row-sep';
+      sep.setAttribute('aria-hidden', 'true');
+      sep.textContent = '·';
+      metaEl.appendChild(sep);
+    }
+    const timeEl = document.createElement('time');
+    timeEl.className = 'rr-row-time';
+    const ts = j.lastActionAt || j.createdAt || Date.now();
+    timeEl.dateTime = new Date(ts).toISOString();
+    const abs = formatAbsoluteTime(ts);
+    const rel = formatRelativeTime(ts);
+    timeEl.textContent = rel;
+    timeEl.title = abs;
+    timeEl.setAttribute('aria-label', abs + ', ' + rel);
+    metaEl.appendChild(timeEl);
+
+    // Stage chip + row-level stage data attr (drives Rejected opacity).
+    const stage = j.stage || 'saved';
+    stageChip.dataset.stage = stage;
+    stageChip.textContent = STRINGS.tracker.stages[stage] || stage;
+    root.dataset.stage = stage;
+  }
+
+  paint(jobLead);
+  parent.appendChild(root);
+
+  function openOriginal() {
+    if (!jobLead.sourceUrl) return;
+    chrome.tabs.create({ url: jobLead.sourceUrl, active: true })
+      .catch((err) => console.warn('[tracker] open original failed', err));
+  }
+  function onClick() { openOriginal(); }
+  function onKeydown(event) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      openOriginal();
+    }
+  }
+  root.addEventListener('click', onClick);
+  root.addEventListener('keydown', onKeydown);
+
+  return {
+    unmount() {
+      root.removeEventListener('click', onClick);
+      root.removeEventListener('keydown', onKeydown);
+      root.remove();
+    },
+    update(newJobLead, isNew) {
+      jobLead = newJobLead;
+      paint(newJobLead);
+      if (isNew) {
+        root.classList.remove('rr-row-new');
+        // Force reflow so the animation restarts.
+        void root.offsetWidth;
+        root.classList.add('rr-row-new');
+      }
+    },
+  };
+}
+
+// JobList: container + list of JobRows. Returns { unmount, setEntries(jobs, newIds) }.
+// setEntries does a full re-render (acceptable at v1 list sizes per spec
+// performance line 195). Rows whose id is in `newIds` get the flash class.
+function JobList(parent, state, initialEntries, initialNewIds) {
+  const list = document.createElement('div');
+  list.className = 'rr-job-list';
+  list.setAttribute('role', 'list');
+  parent.appendChild(list);
+
+  let rows = [];
+
+  function render(entries, newIds) {
+    rows.forEach((r) => r.unmount());
+    rows = entries.map((j) => JobRow(list, j, { isNew: !!(newIds && newIds.has(j.id)) }));
+  }
+  render(initialEntries, initialNewIds);
+
+  return {
+    unmount() {
+      rows.forEach((r) => r.unmount());
+      rows = [];
+      list.remove();
+    },
+    setEntries(entries, newIds) { render(entries, newIds); },
+  };
+}
+
 // Tracker owns the in-memory job map and the chrome.storage.onChanged
 // subscription. Sync function returning the unmount handle immediately;
 // async initial load runs internally and bails on `unmounted` if torn
@@ -346,24 +532,63 @@ function renderTrackerSkeleton(parent) {
 function Tracker(parent, state) {
   let unmounted = false;
   let stripHandle = null;
-  let emptyHandle = null;
   let listenerAttached = false;
   const jobsByKey = new Map();
+  // listMode: 'empty' (JobListEmptyState mounted) | 'populated' (JobList mounted)
+  let listMode = null;
+  let listHandle = null;
 
   const skeleton = renderTrackerSkeleton(parent);
+
+  function jobsArrayFromMap() {
+    return Array.from(jobsByKey.values()).sort(
+      (a, b) => (b.lastActionAt || 0) - (a.lastActionAt || 0)
+    );
+  }
+
+  function reconcileList(newlyAddedIds) {
+    const entries = jobsArrayFromMap();
+    const newMode = entries.length === 0 ? 'empty' : 'populated';
+    if (newMode !== listMode) {
+      // Tear down current list area and mount the other. EmptyState's unmount
+      // is a bare function (sync DOM remove); JobList returns an object.
+      if (listHandle) {
+        if (listMode === 'empty') listHandle();
+        else listHandle.unmount();
+      }
+      if (newMode === 'empty') {
+        listHandle = JobListEmptyState(parent);
+      } else {
+        listHandle = JobList(parent, state, entries, newlyAddedIds);
+      }
+      listMode = newMode;
+    } else if (newMode === 'populated') {
+      listHandle.setEntries(entries, newlyAddedIds);
+    }
+    // 'empty' -> 'empty' is a no-op.
+  }
 
   function onStorageChanged(changes, areaName) {
     if (areaName !== 'local' || !stripHandle) return;
     let touched = false;
+    const newlyAddedIds = new Set();
     for (const key of Object.keys(changes)) {
       if (!isJobKey(key)) continue;
       const change = changes[key];
-      if (change.newValue !== undefined) jobsByKey.set(key, change.newValue);
-      else jobsByKey.delete(key);
+      const wasInMap = jobsByKey.has(key);
+      if (change.newValue !== undefined) {
+        if (!wasInMap && change.newValue && change.newValue.id) {
+          newlyAddedIds.add(change.newValue.id);
+        }
+        jobsByKey.set(key, change.newValue);
+      } else {
+        jobsByKey.delete(key);
+      }
       touched = true;
     }
     if (touched) {
       stripHandle.setCounts(deriveStageCounts(Array.from(jobsByKey.values())));
+      reconcileList(newlyAddedIds);
     }
   }
 
@@ -376,15 +601,16 @@ function Tracker(parent, state) {
       });
       skeleton.remove();
       stripHandle = StageStrip(parent, state, deriveStageCounts(Array.from(jobsByKey.values())));
-      emptyHandle = JobListEmptyState(parent);
+      // Initial mount: no `newlyAddedIds` so existing jobs do NOT flash.
+      reconcileList(new Set());
       chrome.storage.onChanged.addListener(onStorageChanged);
       listenerAttached = true;
     } catch (err) {
       if (unmounted) return;
       console.error('[tracker] initial load failed', err);
-      // Commit 5 will add a proper error state with retry. For commit 2,
-      // leave the skeleton up so the user sees something rather than a
-      // blank panel; the listener is not attached on failure.
+      // Commit 5 will add a proper error state with retry. For now leave
+      // the skeleton up so the user sees something rather than a blank
+      // panel; the listener is not attached on failure.
     }
   })();
 
@@ -392,11 +618,14 @@ function Tracker(parent, state) {
     unmounted = true;
     if (listenerAttached) chrome.storage.onChanged.removeListener(onStorageChanged);
     if (stripHandle) stripHandle.unmount();
-    if (emptyHandle) emptyHandle();
+    if (listHandle) {
+      if (listMode === 'empty') listHandle();
+      else listHandle.unmount();
+    }
     if (skeleton.parentNode) skeleton.remove();
   };
 }
-// ── end Wave 1 task 9 part 2 ───────────────────────────────────────────────
+// ── end Wave 1 task 9 part 2/3 ─────────────────────────────────────────────
 
 function App(parent, state) {
   parent.innerHTML = '';

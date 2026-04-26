@@ -68,7 +68,11 @@
     border: 1px solid var(--border);
   }
   .rr-main { flex: 1; padding: 20px 16px; overflow-y: auto; }
-  .rr-state { display: none; flex-direction: column; gap: 12px; align-items: flex-start; }
+  .rr-state { display: none; flex-direction: column; }
+  .rr-state-loading,
+  .rr-state-collapsed,
+  .rr-state-error { gap: 12px; align-items: flex-start; }
+  .rr-state-ready  { gap: 0; align-items: stretch; margin: -20px -16px; }
   body[data-state="loading"]   .rr-state[data-show-on="loading"],
   body[data-state="collapsed"] .rr-state[data-show-on="collapsed"],
   body[data-state="ready"]     .rr-state[data-show-on="ready"],
@@ -98,6 +102,59 @@
   @media (prefers-reduced-motion: reduce) {
     .rr-spinner { animation-duration: 2s; }
   }
+
+  /* Wave 1 task 9 part 1: tab navigation shell. */
+  .rr-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    position: sticky; top: 0; z-index: 1;
+  }
+  .rr-tab {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 10px 4px 8px;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .rr-tab:hover { color: var(--text); }
+  .rr-tab[aria-selected="true"] {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+  .rr-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .rr-tab-icon { display: block; }
+  .rr-tab-icon svg { width: 20px; height: 20px; display: block; }
+  .rr-tab-label { display: block; }
+  .rr-tab-content { padding: 20px 16px; }
+  .rr-tabpanel[hidden] { display: none; }
+
+  .rr-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 12px;
+    padding: 40px 16px;
+    min-height: 240px;
+    color: var(--text-muted);
+  }
+  .rr-empty-icon { color: var(--text-muted); opacity: 0.5; }
+  .rr-empty-icon svg { width: 48px; height: 48px; display: block; }
+  .rr-empty-heading { margin: 0; font-size: 14px; font-weight: 600; color: var(--text); }
+  .rr-empty-body { margin: 0; font-size: 13px; color: var(--text-muted); max-width: 280px; line-height: 1.5; }
 </style>
 </head>
 <body data-state="loading">
@@ -121,7 +178,7 @@
     </section>
 
     <section class="rr-state rr-state-ready" data-show-on="ready">
-      <p class="rr-state-msg" data-i18n="state.ready.msg">Workspace ready. Tracker UI ships in the next wave.</p>
+      <div id="rr-app-root"></div>
     </section>
 
     <section class="rr-state rr-state-error" data-show-on="error" role="alert">

@@ -36,6 +36,9 @@ const TAB_ICON = {
 };
 // ── end Wave 1 task 9 part 1 (constants) ───────────────────────────────────
 
+// Wave 1 task 9 part 2: stage ordering. Used by StageStrip and Tracker.
+const STAGE_ORDER = ['saved', 'applied', 'replied', 'interviewing', 'offer', 'rejected'];
+
 // Single source of truth for all UI copy. Per build rule: every UI string
 // editable in one place, i18n-ready even though not localised yet.
 const STRINGS = {
@@ -46,14 +49,31 @@ const STRINGS = {
     ready:     { pill: 'Ready' },
     error:     { pill: 'Error',    msg: 'Something went wrong loading the panel.', action: 'Retry' },
   },
-  // Wave 1 task 9 part 1: per-tab labels and coming-soon copy. Tracker copy
-  // is an honest placeholder; commit 2 replaces it with the real Tracker.
+  // Wave 1 task 9 part 1: per-tab labels and coming-soon copy. Tracker has
+  // no emptyBody after part 2 because the tab now mounts the real Tracker
+  // module instead of an EmptyState placeholder.
   tabs: {
     overview: { label: 'Overview', emptyBody: 'Save a job from LinkedIn, Lever, or Indeed to start.' },
     contacts: { label: 'Contacts', emptyBody: 'Contact discovery ships in the next update.' },
     messages: { label: 'Messages', emptyBody: 'Message generation ships in the next update.' },
-    tracker:  { label: 'Tracker',  emptyBody: 'Tracker UI ships in the next commit.' },
+    tracker:  { label: 'Tracker' },
     insights: { label: 'Insights', emptyBody: 'Reply rate insights ship after you start sending.' },
+  },
+  // Wave 1 task 9 part 2: tracker copy.
+  tracker: {
+    allLabel: 'All',
+    stages: {
+      saved:        'Saved',
+      applied:      'Applied',
+      replied:      'Replied',
+      interviewing: 'Interviewing',
+      offer:        'Offer',
+      rejected:     'Rejected',
+    },
+    empty: {
+      heading: 'No jobs saved yet',
+      body:    'Click the ReplyRate icon on a LinkedIn, Lever, or Indeed job page to save it.',
+    },
   },
 };
 
@@ -213,6 +233,171 @@ function Tabs(parent, state) {
   };
 }
 
+// ── Wave 1 task 9 part 2: tracker modules ──────────────────────────────────
+
+// Reduces the in-memory map of JobLeads to per-stage counts. Stages outside
+// STAGE_ORDER are silently ignored (defensive against schema drift).
+function deriveStageCounts(jobs) {
+  const counts = { saved: 0, applied: 0, replied: 0, interviewing: 0, offer: 0, rejected: 0 };
+  for (const job of jobs) {
+    const stage = job && job.stage;
+    if (counts[stage] !== undefined) counts[stage]++;
+  }
+  return counts;
+}
+
+function isJobKey(key) { return /^rr_job_/.test(key); }
+
+function StageStrip(parent, _state, initialCounts) {
+  const root = document.createElement('nav');
+  root.className = 'rr-stage-strip';
+  root.setAttribute('aria-label', 'Pipeline by stage');
+
+  // All pill (far left). Single-line "All (N)" per spec.
+  const allPill = document.createElement('button');
+  allPill.type = 'button';
+  allPill.className = 'rr-chip rr-chip-all';
+  allPill.dataset.stage = '__all';
+  root.appendChild(allPill);
+
+  // Six stage chips: stacked label-above-count.
+  const chips = {};
+  STAGE_ORDER.forEach((stageId) => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'rr-chip';
+    chip.dataset.stage = stageId;
+    const label = document.createElement('span');
+    label.className = 'rr-chip-label';
+    label.textContent = STRINGS.tracker.stages[stageId];
+    const count = document.createElement('span');
+    count.className = 'rr-chip-count';
+    chip.appendChild(label);
+    chip.appendChild(count);
+    root.appendChild(chip);
+    chips[stageId] = count;
+  });
+
+  parent.appendChild(root);
+
+  function setCounts(newCounts) {
+    let total = 0;
+    STAGE_ORDER.forEach((stageId) => {
+      const n = newCounts[stageId] || 0;
+      total += n;
+      chips[stageId].textContent = String(n);
+    });
+    allPill.textContent = STRINGS.tracker.allLabel + ' (' + total + ')';
+  }
+  setCounts(initialCounts);
+
+  return {
+    unmount() { root.remove(); },
+    setCounts,
+  };
+}
+
+function JobListEmptyState(parent) {
+  return EmptyState(parent, {
+    icon: TAB_ICON.tracker,
+    heading: STRINGS.tracker.empty.heading,
+    body:    STRINGS.tracker.empty.body,
+  });
+}
+
+function renderTrackerSkeleton(parent) {
+  const root = document.createElement('div');
+  root.className = 'rr-tracker-skeleton';
+  root.setAttribute('role', 'status');
+  root.setAttribute('aria-busy', 'true');
+  root.setAttribute('aria-label', 'Loading tracker');
+
+  const stripSkel = document.createElement('div');
+  stripSkel.className = 'rr-skeleton-strip';
+  // 1 All-pill placeholder + 6 stage chip placeholders.
+  const all = document.createElement('div');
+  all.className = 'rr-skeleton rr-skeleton-chip-all';
+  stripSkel.appendChild(all);
+  for (let i = 0; i < 6; i++) {
+    const c = document.createElement('div');
+    c.className = 'rr-skeleton rr-skeleton-chip';
+    stripSkel.appendChild(c);
+  }
+  root.appendChild(stripSkel);
+
+  // 3 row placeholders per spec "Skeleton rows (3 placeholder shapes)".
+  const listSkel = document.createElement('div');
+  listSkel.className = 'rr-list-skeleton';
+  for (let i = 0; i < 3; i++) {
+    const r = document.createElement('div');
+    r.className = 'rr-skeleton rr-skeleton-row';
+    listSkel.appendChild(r);
+  }
+  root.appendChild(listSkel);
+
+  parent.appendChild(root);
+  return root;
+}
+
+// Tracker owns the in-memory job map and the chrome.storage.onChanged
+// subscription. Sync function returning the unmount handle immediately;
+// async initial load runs internally and bails on `unmounted` if torn
+// down mid-load (boot retry, App re-mount, etc).
+function Tracker(parent, state) {
+  let unmounted = false;
+  let stripHandle = null;
+  let emptyHandle = null;
+  let listenerAttached = false;
+  const jobsByKey = new Map();
+
+  const skeleton = renderTrackerSkeleton(parent);
+
+  function onStorageChanged(changes, areaName) {
+    if (areaName !== 'local' || !stripHandle) return;
+    let touched = false;
+    for (const key of Object.keys(changes)) {
+      if (!isJobKey(key)) continue;
+      const change = changes[key];
+      if (change.newValue !== undefined) jobsByKey.set(key, change.newValue);
+      else jobsByKey.delete(key);
+      touched = true;
+    }
+    if (touched) {
+      stripHandle.setCounts(deriveStageCounts(Array.from(jobsByKey.values())));
+    }
+  }
+
+  (async () => {
+    try {
+      const all = await chrome.storage.local.get(null);
+      if (unmounted) return;
+      Object.entries(all).forEach(([key, value]) => {
+        if (isJobKey(key)) jobsByKey.set(key, value);
+      });
+      skeleton.remove();
+      stripHandle = StageStrip(parent, state, deriveStageCounts(Array.from(jobsByKey.values())));
+      emptyHandle = JobListEmptyState(parent);
+      chrome.storage.onChanged.addListener(onStorageChanged);
+      listenerAttached = true;
+    } catch (err) {
+      if (unmounted) return;
+      console.error('[tracker] initial load failed', err);
+      // Commit 5 will add a proper error state with retry. For commit 2,
+      // leave the skeleton up so the user sees something rather than a
+      // blank panel; the listener is not attached on failure.
+    }
+  })();
+
+  return function unmount() {
+    unmounted = true;
+    if (listenerAttached) chrome.storage.onChanged.removeListener(onStorageChanged);
+    if (stripHandle) stripHandle.unmount();
+    if (emptyHandle) emptyHandle();
+    if (skeleton.parentNode) skeleton.remove();
+  };
+}
+// ── end Wave 1 task 9 part 2 ───────────────────────────────────────────────
+
 function App(parent, state) {
   parent.innerHTML = '';
   const tabsUnmount = Tabs(parent, state);
@@ -221,8 +406,9 @@ function App(parent, state) {
   content.className = 'rr-tab-content';
   parent.appendChild(content);
 
-  // Mount one tabpanel per tab upfront. Five EmptyStates is cheap and avoids
-  // mount/unmount churn on every tab switch.
+  // Mount one tabpanel per tab upfront. Tracker gets its real module; the
+  // other four show a coming-soon EmptyState. No mount/unmount churn on
+  // tab switch (visibility is toggled via the `hidden` attribute).
   const panels = TAB_IDS.map((id) => {
     const panel = document.createElement('section');
     panel.setAttribute('role', 'tabpanel');
@@ -231,11 +417,13 @@ function App(parent, state) {
     panel.className = 'rr-tabpanel';
     panel.dataset.tab = id;
     content.appendChild(panel);
-    const emptyUnmount = EmptyState(panel, {
-      icon: TAB_ICON[id],
-      body: STRINGS.tabs[id].emptyBody,
-    });
-    return { id, panel, unmount: emptyUnmount };
+    const contentUnmount = id === 'tracker'
+      ? Tracker(panel, state)
+      : EmptyState(panel, {
+          icon: TAB_ICON[id],
+          body: STRINGS.tabs[id].emptyBody,
+        });
+    return { id, panel, unmount: contentUnmount };
   });
 
   function showActivePanel() {

@@ -15,6 +15,16 @@
     --accent: #7c5dff;
     --accent-text: #ffffff;
     --error: #c0392b;
+    /* Wave 1 task 9: stage colour tokens. Spec "Visual tokens": Saved
+       (neutral), Applied (blue), Replied (yellow), Interviewing (purple),
+       Offer (green), Rejected (muted/grey). Defined now; applied to row
+       badges (commit 3) and stage dropdown (commit 5). */
+    --stage-saved:        var(--text-muted);
+    --stage-applied:      #3b82f6;
+    --stage-replied:      #eab308;
+    --stage-interviewing: #8b5cf6;
+    --stage-offer:        #22c55e;
+    --stage-rejected:     var(--text-muted);
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -155,6 +165,76 @@
   .rr-empty-icon svg { width: 48px; height: 48px; display: block; }
   .rr-empty-heading { margin: 0; font-size: 14px; font-weight: 600; color: var(--text); }
   .rr-empty-body { margin: 0; font-size: 13px; color: var(--text-muted); max-width: 280px; line-height: 1.5; }
+
+  /* Wave 1 task 9 part 2: tracker scaffold. */
+  .rr-stage-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 4px 0 12px;
+  }
+  .rr-chip {
+    appearance: none;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+    padding: 6px 10px;
+  }
+  .rr-chip:hover { border-color: var(--text-muted); }
+  .rr-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* Selected chip styling (commit 4 will toggle aria-pressed). */
+  .rr-chip[aria-pressed="true"] {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .rr-chip-all {
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .rr-chip:not(.rr-chip-all) {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    min-width: 60px;
+  }
+  .rr-chip-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+  }
+  .rr-chip-count {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Loading skeleton. */
+  .rr-tracker-skeleton { display: flex; flex-direction: column; gap: 12px; }
+  .rr-list-skeleton { display: flex; flex-direction: column; gap: 8px; }
+  .rr-skeleton {
+    background: linear-gradient(90deg, var(--surface) 0%, var(--border) 50%, var(--surface) 100%);
+    background-size: 200% 100%;
+    animation: rr-shimmer 1.4s ease-in-out infinite;
+    border-radius: 6px;
+  }
+  .rr-skeleton-strip { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0; }
+  .rr-skeleton-chip { height: 44px; width: 64px; }
+  .rr-skeleton-chip-all { height: 28px; width: 56px; align-self: center; }
+  .rr-skeleton-row { height: 56px; width: 100%; }
+  @keyframes rr-shimmer {
+    0%   { background-position: 100% 0; }
+    100% { background-position: -100% 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .rr-skeleton { animation: none; }
+  }
 </style>
 </head>
 <body data-state="loading">

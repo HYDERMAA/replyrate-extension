@@ -225,3 +225,15 @@ Why dismissNow does not fire callbacks. Replacement is not cancellation. When sh
 - canonical URL: the stable identifier form of a source URL. Per-source helpers (canonicalLinkedInJobUrl, canonicalLeverUrl, canonicalIndeedUrl) collapse the many shapes of a job URL into a single string used for dedupe and display.
 - lingering filter: the state where currentFilter is set but total entries is 0; mode is 'empty' and JobListEmptyState renders, but the filter is preserved in memory for the next matching save.
 - recentlyRestoredIds: a Set in Tracker used by Undo to suppress the flash class on restored rows. One-shot consumption in onStorageChanged.
+
+## 11. Running tests
+
+A static HTML test harness lives in `tests/index.html`. It loads sidepanel.js with a `window.RR_TEST_MODE` flag set so boot() does not run, swaps `window.chrome` for a mock implementation, and runs roughly 50 test cases across 10 suites covering about 30 of the 100 task-9 acceptance checks.
+
+To run:
+1. Reload the extension at chrome://extensions.
+2. Find the extension ID (visible on the extensions page).
+3. Open `chrome-extension://<extension-id>/tests/index.html` in any tab.
+4. The page summary shows pass/fail counts; per-test failures include the assertion error.
+
+The document title is set to `[ok] N/M ReplyRate tests` on full pass and `[fail] N/M ...` on any failure, as a placeholder for a future headless integration that reads the title programmatically. Real-Chrome-only checks (visual focus rings, scroll positioning, screen-reader announcement, real chrome.storage event timing) stay manual and are listed in WAVE1_TASK9_SPEC.md's acceptance checklist.

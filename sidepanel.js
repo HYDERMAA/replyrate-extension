@@ -1553,13 +1553,20 @@ async function requestActiveTabCapture() {
   }
 }
 
-$('rr-retry-btn').addEventListener('click', boot);
-$('rr-expand-btn').addEventListener('click', () => setState(STATES.READY));
+// Wave 1 task 9 part E (test harness): a single guard at the bottom of the
+// file lets tests/index.html load this script for its function declarations
+// without booting the panel UI or wiring listeners that depend on real DOM
+// stubs. Production loads (sidepanel.html) leave RR_TEST_MODE undefined and
+// run normally.
+if (typeof window === 'undefined' || !window.RR_TEST_MODE) {
+  $('rr-retry-btn').addEventListener('click', boot);
+  $('rr-expand-btn').addEventListener('click', () => setState(STATES.READY));
 
-// Service worker can drive state changes by sending { type: 'rr_set_state', state, error, notice? }.
-// Notice rendering is deferred (Option A from Wave 0 task 7); the field is observable in devtools.
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg && msg.type === 'rr_set_state') setState(msg.state, msg.error);
-});
+  // Service worker can drive state changes by sending { type: 'rr_set_state', state, error, notice? }.
+  // Notice rendering is deferred (Option A from Wave 0 task 7); the field is observable in devtools.
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg && msg.type === 'rr_set_state') setState(msg.state, msg.error);
+  });
 
-boot();
+  boot();
+}

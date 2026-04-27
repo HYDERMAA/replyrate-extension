@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ReplyRate test harness</title>
+<style>
+  body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding: 16px; line-height: 1.5; max-width: 960px; }
+  h1 { font-size: 18px; margin: 0 0 16px; }
+  .summary { font-size: 14px; padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; }
+  .summary.pending { background: #f0f0f0; }
+  .summary.pass    { background: #e6f7e6; color: #1a6b1a; }
+  .summary.fail    { background: #fce8e8; color: #a01818; }
+  .suite { margin: 16px 0; }
+  .suite-name { font-weight: 700; margin-bottom: 4px; }
+  .test { padding: 2px 0 2px 16px; }
+  .test.pass { color: #1a6b1a; }
+  .test.fail { color: #a01818; }
+  .test pre { background: #fafafa; padding: 8px; border-left: 3px solid #a01818; margin: 4px 0; font-size: 12px; white-space: pre-wrap; }
+  /* Test fixtures live offscreen so module side-effects do not leak into the report. */
+  #test-fixture { position: absolute; left: -10000px; top: -10000px; width: 480px; height: 600px; }
+</style>
+</head>
+<body>
+  <h1>ReplyRate test harness</h1>
+  <div id="summary" class="summary pending">Running...</div>
+  <div id="report"></div>
+
+  <!-- Stub elements that sidepanel.js's pill / retry / expand selectors reference. -->
+  <span id="rr-state-pill" hidden></span>
+  <button id="rr-retry-btn" hidden></button>
+  <button id="rr-expand-btn" hidden></button>
+  <div id="rr-error-msg" hidden></div>
+  <div id="rr-app-root" hidden></div>
+
+  <!-- Modules under test mount into this fixture during it() blocks. -->
+  <div id="test-fixture"></div>
+
+  <script src="mock-chrome.js"></script>
+  <script>window.RR_TEST_MODE = true;</script>
+  <script src="../sidepanel.js"></script>
+  <script src="test-runner.js"></script>
+  <script src="test-modules.js"></script>
+  <script>runAll();</script>
+</body>
+</html>

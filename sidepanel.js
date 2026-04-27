@@ -78,6 +78,7 @@ const STRINGS = {
     // (full names) used for both visible badge text and accessible name.
     row: {
       sourceLabels: { linkedin: 'LinkedIn', lever: 'Lever', indeed: 'Indeed' },
+      sourceAriaPrefix: 'From ',
     },
     time: {
       justNow:    'Just now',
@@ -416,13 +417,14 @@ function JobRow(parent, jobLead, options) {
   root.appendChild(stageChip);
 
   function paint(j) {
-    // Source badge. Visible text is the accessible name; no aria-label set.
-    // Spec deviation from line 165 (was: aria-label "From X"); flagged in
-    // commit message for Wave 4 task 36 audit.
+    // Source badge: visible "LinkedIn" plus aria-label "From LinkedIn" per
+    // spec line 165. Slight redundancy for SR users; the explicit "From"
+    // disambiguates the source pill from the company string that follows.
     const sourceType = j.sourceType || 'unknown';
     const fullName = STRINGS.tracker.row.sourceLabels[sourceType];
     badge.dataset.source = fullName ? sourceType : 'unknown';
     badge.textContent = fullName || (sourceType ? sourceType.replace(/^./, c => c.toUpperCase()) : 'Unknown');
+    badge.setAttribute('aria-label', STRINGS.tracker.row.sourceAriaPrefix + badge.textContent);
 
     // Title (fallback when missing).
     titleEl.textContent = j.title || '(untitled)';

@@ -88,6 +88,11 @@ const STRINGS = {
       daysAgo:    (n) => n + ' days ago',
       monthsShort: ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],
     },
+    // Wave 1 task 9 part 4: filter copy.
+    filter: {
+      emptyHeading: (stageLabel) => 'No jobs in ' + stageLabel + ' stage yet.',
+      showAll: 'Show all',
+    },
   },
 };
 
@@ -262,7 +267,14 @@ function deriveStageCounts(jobs) {
 
 function isJobKey(key) { return /^rr_job_/.test(key); }
 
-function StageStrip(parent, _state, initialCounts) {
+function StageStrip(parent, _state, initialCounts, options) {
+  options = options || {};
+  const onSelect = options.onSelect || (() => {});
+  // Mirrors Tracker's currentFilter (kept in sync via setSelected). Used by
+  // the click handler to decide whether to toggle off vs. switch to a new
+  // filter when the user clicks a chip.
+  let currentSelected = null;
+
   const root = document.createElement('nav');
   root.className = 'rr-stage-strip';
   root.setAttribute('aria-label', 'Pipeline by stage');
@@ -294,6 +306,22 @@ function StageStrip(parent, _state, initialCounts) {
 
   parent.appendChild(root);
 
+  function handleClick(event) {
+    const chip = event.target.closest('.rr-chip');
+    if (!chip || !root.contains(chip)) return;
+    const stage = chip.dataset.stage;
+    if (stage === '__all') {
+      // All pill always clears the filter, regardless of current state.
+      onSelect(null);
+    } else if (stage === currentSelected) {
+      // Re-clicking the active stage clears the filter (toggle off).
+      onSelect(null);
+    } else {
+      onSelect(stage);
+    }
+  }
+  root.addEventListener('click', handleClick);
+
   function setCounts(newCounts) {
     let total = 0;
     STAGE_ORDER.forEach((stageId) => {
@@ -303,11 +331,27 @@ function StageStrip(parent, _state, initialCounts) {
     });
     allPill.textContent = STRINGS.tracker.allLabel + ' (' + total + ')';
   }
+
+  function setSelected(stageId) {
+    currentSelected = stageId;
+    const allChips = root.querySelectorAll('.rr-chip');
+    allChips.forEach((chip) => {
+      const chipStage = chip.dataset.stage;
+      const isPressed = chipStage === '__all' ? stageId === null : chipStage === stageId;
+      chip.setAttribute('aria-pressed', isPressed ? 'true' : 'false');
+    });
+  }
+
   setCounts(initialCounts);
+  setSelected(null); // initial: no filter, All pill is pressed.
 
   return {
-    unmount() { root.remove(); },
+    unmount() {
+      root.removeEventListener('click', handleClick);
+      root.remove();
+    },
     setCounts,
+    setSelected,
   };
 }
 
@@ -317,6 +361,36 @@ function JobListEmptyState(parent) {
     heading: STRINGS.tracker.empty.heading,
     body:    STRINGS.tracker.empty.body,
   });
+}
+
+// Wave 1 task 9 part 4: shown when a stage filter is active and the filter
+// has zero matches. "Show all" is a button (state change, not navigation),
+// styled as a link via .rr-link.
+function FilteredEmptyState(parent, stageLabel, onShowAll) {
+  const root = document.createElement('div');
+  root.className = 'rr-empty rr-filtered-empty';
+  root.setAttribute('role', 'status');
+
+  const body = document.createElement('p');
+  body.className = 'rr-empty-body';
+  body.textContent = STRINGS.tracker.filter.emptyHeading(stageLabel);
+  root.appendChild(body);
+
+  const link = document.createElement('button');
+  link.type = 'button';
+  link.className = 'rr-link';
+  link.textContent = STRINGS.tracker.filter.showAll;
+  link.addEventListener('click', onShowAll);
+  root.appendChild(link);
+
+  parent.appendChild(root);
+
+  return {
+    unmount() {
+      link.removeEventListener('click', onShowAll);
+      root.remove();
+    },
+  };
 }
 
 function renderTrackerSkeleton(parent) {
@@ -536,9 +610,22 @@ function Tracker(parent, state) {
   let stripHandle = null;
   let listenerAttached = false;
   const jobsByKey = new Map();
-  // listMode: 'empty' (JobListEmptyState mounted) | 'populated' (JobList mounted)
+  // listMode: 'empty' | 'list' | 'filtered_empty'
+  //   'empty'          - total === 0; JobListEmptyState mounted (filter ignored visually)
+  //   'list'           - total > 0; JobList mounted (filtered or full entries)
+  //   'filtered_empty' - filter active and matches === 0; FilteredEmptyState mounted
   let listMode = null;
   let listHandle = null;
+  // Tracks the filter label currently displayed by FilteredEmptyState so we
+  // remount when the user switches between two empty stages without leaving
+  // the filtered_empty mode.
+  let displayedFilterLabel = null;
+  // Filter is in-memory only; null = "show all". Per spec, NOT persisted
+  // across panel close/reopen. Filter state is preserved across mode changes
+  // (we never silently mutate it), so a user filtered to Saved who deletes
+  // their last Saved row sees the filter linger; a subsequent matching save
+  // appears, a non-matching save renders FilteredEmptyState.
+  let currentFilter = null;
 
   const skeleton = renderTrackerSkeleton(parent);
 
@@ -548,26 +635,73 @@ function Tracker(parent, state) {
     );
   }
 
+  function filterNewIds(newIds, filteredEntries) {
+    if (!newIds || newIds.size === 0) return new Set();
+    const filteredIdSet = new Set(filteredEntries.map((j) => j.id));
+    const out = new Set();
+    newIds.forEach((id) => { if (filteredIdSet.has(id)) out.add(id); });
+    return out;
+  }
+
+  function teardownCurrentListHandle() {
+    if (!listHandle) return;
+    if (listMode === 'empty') listHandle();        // bare unmount fn
+    else listHandle.unmount();                     // { unmount, ... } object
+    listHandle = null;
+  }
+
+  function setFilter(stageId) {
+    if (stageId === currentFilter) return;
+    currentFilter = stageId;
+    if (stripHandle) stripHandle.setSelected(currentFilter);
+    reconcileList(new Set());
+  }
+
   function reconcileList(newlyAddedIds) {
-    const entries = jobsArrayFromMap();
-    const newMode = entries.length === 0 ? 'empty' : 'populated';
-    if (newMode !== listMode) {
-      // Tear down current list area and mount the other. EmptyState's unmount
-      // is a bare function (sync DOM remove); JobList returns an object.
-      if (listHandle) {
-        if (listMode === 'empty') listHandle();
-        else listHandle.unmount();
-      }
+    const allEntries = jobsArrayFromMap();
+    const filtered = currentFilter
+      ? allEntries.filter((j) => j.stage === currentFilter)
+      : allEntries;
+
+    // Mode rules. Filter state is preserved across mode changes; we never
+    // silently mutate currentFilter. When total === 0, the filter is
+    // meaningless visually so we render JobListEmptyState, but currentFilter
+    // stays set in memory for the lingering-filter case.
+    let newMode;
+    if (allEntries.length === 0) {
+      newMode = 'empty';
+    } else if (currentFilter && filtered.length === 0) {
+      newMode = 'filtered_empty';
+    } else {
+      newMode = 'list';
+    }
+    const newFilterLabel = currentFilter
+      ? (STRINGS.tracker.stages[currentFilter] || currentFilter)
+      : null;
+
+    const modeChanged = newMode !== listMode;
+    const labelChanged = newMode === 'filtered_empty' && newFilterLabel !== displayedFilterLabel;
+
+    if (modeChanged || labelChanged) {
+      teardownCurrentListHandle();
       if (newMode === 'empty') {
         listHandle = JobListEmptyState(parent);
-      } else {
-        listHandle = JobList(parent, state, entries, newlyAddedIds);
+        displayedFilterLabel = null;
+      } else if (newMode === 'filtered_empty') {
+        listHandle = FilteredEmptyState(parent, newFilterLabel, () => setFilter(null));
+        displayedFilterLabel = newFilterLabel;
+      } else { // 'list'
+        const filteredNewIds = filterNewIds(newlyAddedIds, filtered);
+        listHandle = JobList(parent, state, filtered, filteredNewIds);
+        displayedFilterLabel = null;
       }
       listMode = newMode;
-    } else if (newMode === 'populated') {
-      listHandle.setEntries(entries, newlyAddedIds);
+    } else if (newMode === 'list') {
+      const filteredNewIds = filterNewIds(newlyAddedIds, filtered);
+      listHandle.setEntries(filtered, filteredNewIds);
     }
-    // 'empty' -> 'empty' is a no-op.
+    // 'empty' -> 'empty' or 'filtered_empty' -> 'filtered_empty' (same label):
+    // no-op. Strip counts already updated by stripHandle.setCounts above this call.
   }
 
   function onStorageChanged(changes, areaName) {
@@ -602,7 +736,11 @@ function Tracker(parent, state) {
         if (isJobKey(key)) jobsByKey.set(key, value);
       });
       skeleton.remove();
-      stripHandle = StageStrip(parent, state, deriveStageCounts(Array.from(jobsByKey.values())));
+      stripHandle = StageStrip(
+        parent, state,
+        deriveStageCounts(Array.from(jobsByKey.values())),
+        { onSelect: setFilter }
+      );
       // Initial mount: no `newlyAddedIds` so existing jobs do NOT flash.
       reconcileList(new Set());
       chrome.storage.onChanged.addListener(onStorageChanged);
@@ -620,14 +758,11 @@ function Tracker(parent, state) {
     unmounted = true;
     if (listenerAttached) chrome.storage.onChanged.removeListener(onStorageChanged);
     if (stripHandle) stripHandle.unmount();
-    if (listHandle) {
-      if (listMode === 'empty') listHandle();
-      else listHandle.unmount();
-    }
+    teardownCurrentListHandle();
     if (skeleton.parentNode) skeleton.remove();
   };
 }
-// ── end Wave 1 task 9 part 2/3 ─────────────────────────────────────────────
+// ── end Wave 1 task 9 part 2/3/4 ───────────────────────────────────────────
 
 function App(parent, state) {
   parent.innerHTML = '';

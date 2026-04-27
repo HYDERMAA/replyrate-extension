@@ -348,6 +348,204 @@
     padding: 24px 16px;
     gap: 8px;
   }
+
+  /* Wave 1 task 9 part 5: stage dropdown, overflow menu, dialog, toast. */
+
+  /* StageDropdown trigger inherits .rr-row-stage styling from commit 3. */
+  .rr-stage-dropdown-trigger {
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .rr-stage-dropdown-trigger:hover { background-color: rgba(124, 93, 255, 0.06); }
+  .rr-stage-dropdown-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .rr-stage-dropdown-trigger[aria-expanded="true"] { border-color: var(--accent); }
+  .rr-stage-dropdown-trigger[aria-busy="true"] { opacity: 0.55; }
+  .rr-stage-dropdown-trigger::after {
+    content: '';
+    width: 0; height: 0;
+    border-left: 3px solid transparent;
+    border-right: 3px solid transparent;
+    border-top: 3px solid currentColor;
+    margin-left: 2px;
+  }
+
+  /* Listbox (portal). */
+  .rr-listbox {
+    position: fixed;
+    z-index: 1000;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+    padding: 4px;
+    margin: 0;
+    list-style: none;
+    min-width: 140px;
+    max-height: 280px;
+    overflow-y: auto;
+    font-size: 12px;
+  }
+  .rr-listbox:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .rr-option {
+    padding: 6px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .rr-option:hover,
+  .rr-option.rr-option-active { background-color: var(--surface); }
+  .rr-option[aria-selected="true"] { color: var(--accent); font-weight: 600; }
+  .rr-option[aria-selected="true"]::before {
+    content: '\2713';
+    font-size: 11px;
+    color: var(--accent);
+  }
+  .rr-option:not([aria-selected="true"])::before {
+    content: '';
+    width: 11px;
+  }
+
+  /* Row stage area: stacks dropdown trigger and any error pill above it. */
+  .rr-row-stage-area {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .rr-row-error-pill {
+    font-size: 10px;
+    font-weight: 600;
+    color: #ffffff;
+    background: var(--error);
+    padding: 2px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+
+  /* Overflow menu trigger. */
+  .rr-row-overflow-area { flex-shrink: 0; align-self: flex-start; margin-top: 2px; }
+  .rr-overflow-trigger {
+    background: none;
+    border: none;
+    border-radius: 4px;
+    padding: 4px;
+    cursor: pointer;
+    color: var(--text-muted);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .rr-overflow-trigger:hover { background-color: var(--surface); color: var(--text); }
+  .rr-overflow-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .rr-overflow-trigger svg { display: block; }
+
+  /* Overflow menu (portal). */
+  .rr-menu {
+    position: fixed;
+    z-index: 1000;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+    padding: 4px;
+    margin: 0;
+    list-style: none;
+    min-width: 160px;
+    font-size: 13px;
+  }
+  .rr-menu:focus { outline: none; }
+  .rr-menuitem {
+    padding: 8px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--text);
+  }
+  .rr-menuitem:hover,
+  .rr-menuitem.rr-menuitem-active { background-color: var(--surface); }
+  .rr-menuitem-destructive { color: var(--error); }
+
+  /* Confirm dialog (modal). */
+  .rr-dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1100;
+    padding: 24px;
+  }
+  .rr-dialog {
+    background: var(--bg);
+    border-radius: 12px;
+    padding: 20px;
+    max-width: 320px;
+    width: 100%;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.28);
+  }
+  .rr-dialog-heading { margin: 0 0 8px 0; font-size: 15px; font-weight: 600; color: var(--text); }
+  .rr-dialog-body    { margin: 0 0 16px 0; font-size: 13px; color: var(--text-muted); line-height: 1.5; }
+  .rr-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .rr-btn-secondary {
+    background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    padding: 8px 14px; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .rr-btn-secondary:hover { border-color: var(--text-muted); }
+  .rr-btn-secondary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .rr-btn-destructive {
+    background: var(--error); border: 1px solid var(--error); color: #ffffff;
+    padding: 8px 14px; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .rr-btn-destructive:hover { opacity: 0.9; }
+  .rr-btn-destructive:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* Toast (bottom-center, replaceable). */
+  .rr-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    background: var(--text);
+    color: var(--bg);
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    z-index: 1000;
+    max-width: calc(100% - 32px);
+  }
+  .rr-toast-action {
+    background: none;
+    border: none;
+    color: var(--accent);
+    font: inherit;
+    font-weight: 700;
+    text-decoration: underline;
+    cursor: pointer;
+    padding: 0;
+  }
+  .rr-toast-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+  /* Tracker error state. */
+  .rr-tracker-error {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 12px;
+    padding: 40px 16px;
+  }
+  .rr-tracker-error-heading { margin: 0; font-size: 14px; font-weight: 600; color: var(--text); }
+  .rr-tracker-error-detail  { margin: 0; font-size: 12px; color: var(--text-muted); max-width: 280px; line-height: 1.5; }
 </style>
 </head>
 <body data-state="loading">

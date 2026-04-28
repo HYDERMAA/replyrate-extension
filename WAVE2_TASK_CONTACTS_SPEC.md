@@ -54,14 +54,29 @@ Each unlock is an independent action. A user pays one credit per email reveal. R
 
 Apollo Basic plan ($49/mo annual) includes 1200 email reveals per month. At 5 free unlocks per user, 240 free users per month exhaust one Apollo seat. Paid users at $29/mo each cover their own usage up to about 700 reveals/mo (see Known constraints).
 
-### Apollo proxied via Vercel function
+### Apollo proxied via Vercel function (REFACTOR, not greenfield)
 
-The Apollo API key never touches the client. Chrome extensions cannot keep secrets; any client-side key is harvested within hours. All Apollo calls go through Vercel functions on the existing replyrate.ai infrastructure. Two new endpoints, sharing the auth middleware with the existing `/api/claude`:
+The Apollo API key never touches the client. Chrome extensions cannot keep secrets; any client-side key is harvested within hours. All Apollo calls go through Vercel functions on the existing replyrate.ai infrastructure.
 
-- `POST /api/apollo-search`: takes a JobLead summary, returns Apollo person records with email field always null at this stage.
-- `POST /api/contact-unlock`: takes a contactId and jobId, verifies the user has remaining unlocks via Firestore, calls Apollo for the email, decrements the unlock counter, returns the email.
+`POST /api/apollo-search` already exists in the web app's repo and ships the role-bucketing + email-reveal + Hunter-fallback pipeline (Anthropic Haiku title classification, Apollo `mixed_people/api_search` then `people/match`, Hunter `email-finder` fallback, then a generic `firstname.lastname@domain` pattern fallback). The task here is REFACTOR, not CREATE: gate the email field behind the unlock endpoint (today the search response can include emails directly), add Firebase auth, restrict CORS to `chrome-extension://<id>`. Treat the role-bucketing logic as load-bearing and do not rebuild it.
 
-Both endpoints require a Firebase id token in the Authorization header. CORS allows the extension origin (`chrome-extension://<id>`) explicitly; not `*`.
+There is NO existing auth middleware to reuse. `/api/claude`, `/api/apollo-search`, `/api/hunter-search`, and `/api/apollo-debug` all run unauthenticated today with `Access-Control-Allow-Origin: *`. The first commit of this task BUILDS a shared Firebase Admin auth middleware from scratch and applies it to the new and refactored endpoints.
+
+`POST /api/contact-unlock` is greenfield: takes a contactId and jobId, verifies the user has remaining unlocks via Firestore, returns the email already enriched during search (or refetches if the search response was constructed pre-auth), decrements the unlock counter atomically, returns the email.
+
+All authenticated endpoints require a Firebase id token in the Authorization header. CORS allows the extension origin (`chrome-extension://<id>`) explicitly; not `*`.
+
+### Three-tier email waterfall (Apollo + Hunter + pattern)
+
+`/api/apollo-search` returns a `confidence` and a `source` per contact reflecting which tier produced the email:
+
+1. **Apollo enrichment** (highest confidence, highest cost). `people/match` returns `email` directly when Apollo has a verified record. Counts against the 1200/mo Apollo email-reveal quota.
+2. **Hunter.io fallback** (medium confidence, separate quota). When Apollo returns a name without an email, the backend calls Hunter `v2/email-finder` with the company domain and parsed first/last name. Hunter has its own free quota (25/mo on the free plan, then paid tiers). Does NOT consume an Apollo reveal.
+3. **Pattern fallback** (low confidence, free). When both Apollo and Hunter return nothing, the backend constructs `firstname.lastname@<company-domain>` as a best-effort guess. Marked `email_status: 'pattern'` so the UI can flag low-confidence reveals in a later iteration if needed.
+
+Cost cascade implication: only the Apollo tier consumes the 1200/mo paid quota. Hunter and pattern tiers absorb the rest. Effective Apollo capacity is significantly larger than the raw cap suggests (see Known constraints).
+
+The ContactRecord schema gains a `confidence: number 0-100` field reflecting the tier that produced the email (Apollo verified ~90, Hunter ~50-80, pattern fallback ~20). UI does not display confidence in v1 but persists it in `rr_contacts_<jobId>` for future use.
 
 ### Firebase Auth shared with the web app
 
@@ -104,6 +119,7 @@ ContactRecord schema:
 - `relevanceScore`: number 0-100. Computed against `rr_user_profile.roleTargets` if present, else flat 50 for all candidates. Used for sort order; not displayed in v1 UI (see Known constraints).
 - `email`: string or null. Null until unlocked.
 - `emailUnlockedAt`: number or null. Set on unlock.
+- `confidence`: number 0-100. Reflects which tier of the email waterfall produced the value (Apollo verified ~90, Hunter ~50-80, pattern fallback ~20). Persisted but not displayed in v1.
 
 At most one contact per role bucket appears in the response. If Apollo returns multiple candidates per bucket, the backend's relevance pass picks the top one and excludes the rest. Result: 0-3 ContactRecord entries per JobLead. Zero entries triggers the no_results state.
 
@@ -186,10 +202,10 @@ All four require a tab sender? No: panel-origin messages have no sender.tab. Set
 
 Out of scope for this commit to implement. Flag the contracts so the build commit knows what to expect:
 
-- `POST /api/apollo-search`. Body: `{ jobLead: { title, company, location } }`. Auth header: Firebase id token. Response: `{ contacts: ContactRecord[] }` with email always null. Backend filters contacts that cannot be bucketed into 'hr_ta' / 'hiring_manager' / 'director' and returns at most one per bucket.
-- `POST /api/contact-unlock`. Body: `{ contactId, jobId }`. Auth header required. Backend verifies user has remaining unlocks (Firestore lookup), if yes calls Apollo for email, decrements unlock count atomically, returns `{ ok: true, email }`; if no, returns `{ ok: false, error: 'paywall' }`.
-- `GET /api/user/entitlements`. Auth header required. Returns `{ unlocksUsed, unlocksLimit, subscriptionStatus, subscriptionExpiresAt }`. Polled by panel after Stripe checkout completes.
-- All endpoints share auth middleware with the existing `/api/claude` route. CORS allows `chrome-extension://<id>`. Rate limit: 60 requests/min per uid.
+- **REFACTOR `POST /api/apollo-search`** (already exists; ships role-bucketing + Hunter fallback + pattern fallback). Body unchanged: `{ company, position, level?, location?, jd_text? }`. Apply the new auth middleware. Restrict CORS to `chrome-extension://<id>`. Strip the `email` field from the response (move email reveal to the unlock endpoint). Add `confidence` field to each contact. Backend continues to filter to at most one candidate per role bucket.
+- **CREATE `POST /api/contact-unlock`** (greenfield). Body: `{ contactId, jobId }`. Auth header required. Backend verifies the user has remaining unlocks (Firestore lookup), if yes returns the previously-enriched email (or refetches via Apollo `people/match` if the search ran pre-auth), decrements the unlock count atomically, returns `{ ok: true, email }`; if no, returns `{ ok: false, error: 'paywall' }`.
+- **CREATE `GET /api/user/entitlements`** (greenfield). Auth header required. Returns `{ unlocksUsed, unlocksLimit, subscriptionStatus, subscriptionExpiresAt }`. Polled by panel after Stripe checkout completes.
+- **BUILD shared Firebase Admin auth middleware from scratch**. No existing middleware to reuse: `/api/claude`, `/api/apollo-search`, `/api/hunter-search`, and `/api/apollo-debug` all run unauthenticated today. The middleware verifies the Firebase id token from the Authorization header, attaches `uid` to the request, returns 401 on invalid or expired token. Apply to the new and refactored endpoints. Rate limit: 60 requests/min per uid.
 
 ## Acceptance checklist before shipping
 
@@ -329,7 +345,7 @@ This task does NOT depend on Wave 2 tasks 2-4 to ship. Contacts works standalone
 
 ## Known constraints and risks
 
-- **Apollo rate limits**: Basic plan ($49/mo annual) caps at 1200 email reveals per month and 60 search queries per minute. At 60 free users per day average, monthly free reveals are roughly 9000, exceeding the cap by 7.5x. Either: (a) stricter free tier (3 lifetime), (b) Apollo Pro plan upgrade, or (c) bring-your-own-key for paid users. Decide before public launch; not a launch blocker for closed beta.
+- **Apollo rate limits**: Basic plan ($49/mo annual) caps at 1200 email reveals per month and 60 search queries per minute. The three-tier waterfall (Apollo + Hunter + pattern) means only roughly 30-50% of unlocks actually consume Apollo quota; the rest are absorbed by Hunter (separate quota) or pattern fallback (free). Effective Apollo unlock capacity at Basic is therefore 2400-4000 unlocks/month, not 1200. At 60 free users per day average, monthly free reveals stay within capacity through closed beta. Public launch decision deferred until first 30 days of beta data; mitigations remain (a) stricter free tier, (b) Apollo Pro upgrade, or (c) bring-your-own-key for paid users.
 
 - **Closed beta cap**: invitation-only, target 100 users total during beta. At 5 lifetime free unlocks per user, beta total stays under Apollo Basic's 1200/mo cap. Public launch decision deferred until first 30 days of beta data.
 
@@ -348,6 +364,16 @@ This task does NOT depend on Wave 2 tasks 2-4 to ship. Contacts works standalone
 - **CORS for chrome-extension origin**: Vercel functions must allow `chrome-extension://<id>` explicitly in their CORS config. Cannot use `*` (Stripe webhooks and other endpoints would break). Document in the backend deploy notes.
 
 - **Stripe checkout return**: the extension cannot listen for Stripe's redirect (no web tab to land on). User completes purchase in the new Stripe tab; panel polls `/api/user/entitlements` on next render. There may be a 1-2 second window where the user has paid but the panel still shows the paywall. Acceptable; no spec change needed.
+
+## Pre-build cleanup
+
+Three small commits to land in the `replyrate` web app repo before (or alongside) the Wave 2 task 1 build commit. They are independent of the auth middleware build but cleanly precede or accompany it:
+
+- **Auth check on `/api/claude`**: currently unauthenticated. The proxy will silently leak the ANTHROPIC_API_KEY budget if the extension ID gets out, since CORS allows `*` and there is no token check. Apply the new Firebase auth middleware once it lands. Sequence as the second web-app commit, immediately after the middleware itself.
+- **Remove or gate `/api/apollo-debug`**: the debug helper leaks the first 12 chars of `APOLLO_API_KEY` in its response body via the `apollo_key_prefix` field. Either delete the file or gate it behind an `ADMIN_KEY` env var check. Either way, nothing in the extension calls it.
+- **Fix `/api/claude` CORS bug**: `Access-Control-Allow-Origin: *` is set only on the OPTIONS preflight branch. The POST response is missing the header, so a browser preflight succeeds while the actual POST is blocked when the response is read. Move the CORS headers to fire on every response, not just OPTIONS.
+
+These ship as their own commits and are not part of the Wave 2 task 1 build effort.
 
 ## Things this spec does NOT decide
 

@@ -58,7 +58,7 @@ Apollo Basic plan ($49/mo annual) includes 1200 email reveals per month. At 5 fr
 
 The Apollo API key never touches the client. Chrome extensions cannot keep secrets; any client-side key is harvested within hours. All Apollo calls go through Vercel functions on the existing replyrate.ai infrastructure.
 
-`POST /api/apollo-search` already exists in the web app's repo and ships the role-bucketing + email-reveal + Hunter-fallback pipeline (Anthropic Haiku title classification, Apollo `mixed_people/api_search` then `people/match`, Hunter `email-finder` fallback, then a generic `firstname.lastname@domain` pattern fallback). The task here is REFACTOR, not CREATE: gate the email field behind the unlock endpoint (today the search response can include emails directly), add Firebase auth, restrict CORS to `chrome-extension://<id>`. Treat the role-bucketing logic as load-bearing and do not rebuild it.
+`POST /api/apollo-search` already exists in the web app's repo and ships the role-bucketing + email-reveal pipeline (Anthropic Haiku title classification, Apollo `mixed_people/api_search` then `people/match`, then a generic `firstname.lastname@domain` pattern fallback when Apollo returns a name without an email). The task here is REFACTOR, not CREATE: gate the email field behind the unlock endpoint (today the search response can include emails directly), add Firebase auth, restrict CORS to `chrome-extension://<id>`. Treat the role-bucketing logic as load-bearing and do not rebuild it. The legacy code also calls Hunter.io between Apollo and pattern; see "Two-tier email waterfall" decision for why the spec treats Hunter as removed.
 
 There is NO existing auth middleware to reuse. `/api/claude`, `/api/apollo-search`, `/api/hunter-search`, and `/api/apollo-debug` all run unauthenticated today with `Access-Control-Allow-Origin: *`. The first commit of this task BUILDS a shared Firebase Admin auth middleware from scratch and applies it to the new and refactored endpoints.
 
@@ -66,17 +66,18 @@ There is NO existing auth middleware to reuse. `/api/claude`, `/api/apollo-searc
 
 All authenticated endpoints require a Firebase id token in the Authorization header. CORS allows the extension origin (`chrome-extension://<id>`) explicitly; not `*`.
 
-### Three-tier email waterfall (Apollo + Hunter + pattern)
+### Two-tier email waterfall (Apollo + pattern)
 
-`/api/apollo-search` returns a `confidence` and a `source` per contact reflecting which tier produced the email:
+`/api/apollo-search` returns a `confidence: 'verified' | 'pattern'` per contact reflecting which tier produced the email:
 
-1. **Apollo enrichment** (highest confidence, highest cost). `people/match` returns `email` directly when Apollo has a verified record. Counts against the 1200/mo Apollo email-reveal quota.
-2. **Hunter.io fallback** (medium confidence, separate quota). When Apollo returns a name without an email, the backend calls Hunter `v2/email-finder` with the company domain and parsed first/last name. Hunter has its own free quota (25/mo on the free plan, then paid tiers). Does NOT consume an Apollo reveal.
-3. **Pattern fallback** (low confidence, free). When both Apollo and Hunter return nothing, the backend constructs `firstname.lastname@<company-domain>` as a best-effort guess. Marked `email_status: 'pattern'` so the UI can flag low-confidence reveals in a later iteration if needed.
+1. **Apollo enrichment** (`confidence: 'verified'`). `people/match` returns `email` directly when Apollo has a verified record. Counts against the 1200/mo Apollo email-reveal quota. This is the only tier that yields a real, deliverable email.
+2. **Pattern fallback** (`confidence: 'pattern'`). When Apollo returns a name but no email, the backend constructs `firstname.lastname@<company-domain>` as a best-effort guess. Free; no quota. Marked `confidence: 'pattern'` so the UI renders the address with a "we guessed this" caveat.
 
-Cost cascade implication: only the Apollo tier consumes the 1200/mo paid quota. Hunter and pattern tiers absorb the rest. Effective Apollo capacity is significantly larger than the raw cap suggests (see Known constraints).
+Note: the legacy `/api/apollo-search` code currently includes a Hunter.io fallback between these two tiers. Hunter runs on a free quota (25/mo) that does not extend capacity in any meaningful way, so the spec treats Hunter as removed for capacity-planning purposes. Whether the Hunter call stays in the code as a quiet dead path or gets cleaned up is a code concern, not a spec concern.
 
-The ContactRecord schema gains a `confidence: number 0-100` field reflecting the tier that produced the email (Apollo verified ~90, Hunter ~50-80, pattern fallback ~20). UI does not display confidence in v1 but persists it in `rr_contacts_<jobId>` for future use.
+Cost cascade implication: only the Apollo tier consumes the 1200/mo paid quota. Pattern fallback is free but produces guessed-not-verified emails; the UI labels them accordingly so the user can decide whether to use them.
+
+The ContactRecord schema gains a `confidence: 'verified' | 'pattern'` field. Verified emails render normally with a Copy button. Pattern emails render the same address with explicit warning copy ("We guessed this. Verify first.") plus the Copy button. The user gets the email either way; we just don't pretend a guess is a find.
 
 ### Firebase Auth shared with the web app
 
@@ -119,7 +120,7 @@ ContactRecord schema:
 - `relevanceScore`: number 0-100. Computed against `rr_user_profile.roleTargets` if present, else flat 50 for all candidates. Used for sort order; not displayed in v1 UI (see Known constraints).
 - `email`: string or null. Null until unlocked.
 - `emailUnlockedAt`: number or null. Set on unlock.
-- `confidence`: number 0-100. Reflects which tier of the email waterfall produced the value (Apollo verified ~90, Hunter ~50-80, pattern fallback ~20). Persisted but not displayed in v1.
+- `confidence`: 'verified' | 'pattern'. Reflects which tier of the email waterfall produced the value. UI renders verified emails normally; pattern emails render the same address with a "We guessed this. Verify first." caveat next to the Copy button.
 
 At most one contact per role bucket appears in the response. If Apollo returns multiple candidates per bucket, the backend's relevance pass picks the top one and excludes the rest. Result: 0-3 ContactRecord entries per JobLead. Zero entries triggers the no_results state.
 
@@ -143,7 +144,7 @@ One to three ContactCard components, sorted by relevanceScore descending. One ca
 - Name + title: bold name, smaller muted title underneath.
 - Location: location dot + city if present.
 - LinkedIn link: small "Open in LinkedIn" button. Opens linkedinUrl in new tab. Disabled if linkedinUrl is null.
-- Email row: locked state shows "Unlock email" button. Unlocked state shows the email plus a Copy button (clipboard write).
+- Email row: locked state shows "Unlock email" button. Unlocked state shows the email plus a Copy button (clipboard write). When `confidence === 'pattern'`, the unlocked row also shows a small warning beneath the address: "We guessed this. Verify first." The Copy button still works; the user is making an informed choice.
 
 If `linkedinUrl` is null, the LinkedIn button is disabled with a tooltip explaining the source. Don't hide the button (consistency).
 
@@ -202,7 +203,7 @@ All four require a tab sender? No: panel-origin messages have no sender.tab. Set
 
 Out of scope for this commit to implement. Flag the contracts so the build commit knows what to expect:
 
-- **REFACTOR `POST /api/apollo-search`** (already exists; ships role-bucketing + Hunter fallback + pattern fallback). Body unchanged: `{ company, position, level?, location?, jd_text? }`. Apply the new auth middleware. Restrict CORS to `chrome-extension://<id>`. Strip the `email` field from the response (move email reveal to the unlock endpoint). Add `confidence` field to each contact. Backend continues to filter to at most one candidate per role bucket.
+- **REFACTOR `POST /api/apollo-search`** (already exists; ships role-bucketing + pattern fallback; legacy Hunter.io call between Apollo and pattern is treated as removed for capacity planning, code cleanup is optional). Body unchanged: `{ company, position, level?, location?, jd_text? }`. Apply the new auth middleware. Restrict CORS to `chrome-extension://<id>`. Strip the `email` field from the response (move email reveal to the unlock endpoint). Add `confidence: 'verified' | 'pattern'` field to each contact. Backend continues to filter to at most one candidate per role bucket.
 - **CREATE `POST /api/contact-unlock`** (greenfield). Body: `{ contactId, jobId }`. Auth header required. Backend verifies the user has remaining unlocks (Firestore lookup), if yes returns the previously-enriched email (or refetches via Apollo `people/match` if the search ran pre-auth), decrements the unlock count atomically, returns `{ ok: true, email }`; if no, returns `{ ok: false, error: 'paywall' }`.
 - **CREATE `GET /api/user/entitlements`** (greenfield). Auth header required. Returns `{ unlocksUsed, unlocksLimit, subscriptionStatus, subscriptionExpiresAt }`. Polled by panel after Stripe checkout completes.
 - **BUILD shared Firebase Admin auth middleware from scratch**. No existing middleware to reuse: `/api/claude`, `/api/apollo-search`, `/api/hunter-search`, and `/api/apollo-debug` all run unauthenticated today. The middleware verifies the Firebase id token from the Authorization header, attaches `uid` to the request, returns 401 on invalid or expired token. Apply to the new and refactored endpoints. Rate limit: 60 requests/min per uid.
@@ -225,7 +226,8 @@ Out of scope for this commit to implement. Flag the contracts so the build commi
 
 - [ ] Always shows: name, title, role bucket badge, location (if present), LinkedIn button
 - [ ] Email locked: shows "Unlock email" button, no email text
-- [ ] Email unlocked: shows email text, "Copy email" button, no Unlock button
+- [ ] Email unlocked, confidence='verified': shows email text, "Copy email" button, no caveat, no Unlock button
+- [ ] Email unlocked, confidence='pattern': shows email text, "We guessed this. Verify first." caveat, "Copy email" button, no Unlock button
 - [ ] linkedinUrl null: LinkedIn button disabled with tooltip
 - [ ] location null: location row hidden, no empty space
 - [ ] Copy button writes email to clipboard, shows brief "Copied" confirmation
@@ -345,7 +347,7 @@ This task does NOT depend on Wave 2 tasks 2-4 to ship. Contacts works standalone
 
 ## Known constraints and risks
 
-- **Apollo rate limits**: Basic plan ($49/mo annual) caps at 1200 email reveals per month and 60 search queries per minute. The three-tier waterfall (Apollo + Hunter + pattern) means only roughly 30-50% of unlocks actually consume Apollo quota; the rest are absorbed by Hunter (separate quota) or pattern fallback (free). Effective Apollo unlock capacity at Basic is therefore 2400-4000 unlocks/month, not 1200. At 60 free users per day average, monthly free reveals stay within capacity through closed beta. Public launch decision deferred until first 30 days of beta data; mitigations remain (a) stricter free tier, (b) Apollo Pro upgrade, or (c) bring-your-own-key for paid users.
+- **Apollo rate limits**: Basic plan ($49/mo annual) caps at 1200 email reveals per month and 60 search queries per minute. At 5 lifetime free unlocks per user, 240 free users per month exhaust the cap. The pattern-fallback tier produces guessed-not-verified emails and does not meaningfully extend capacity (the user can copy the guess but it may not deliver). Closed beta cap (target 100 users) keeps total verified-tier consumption well under the cap; public launch is the binding decision. Mitigations: (a) stricter free tier (3 lifetime), (b) Apollo Pro plan upgrade, or (c) bring-your-own-key for paid users. Decide before public launch; not a launch blocker for closed beta.
 
 - **Closed beta cap**: invitation-only, target 100 users total during beta. At 5 lifetime free unlocks per user, beta total stays under Apollo Basic's 1200/mo cap. Public launch decision deferred until first 30 days of beta data.
 

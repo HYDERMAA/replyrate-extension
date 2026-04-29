@@ -1,5 +1,5 @@
 // =============================================================================
-// MESSAGE CONTRACT (Wave 0 task 5)
+// MESSAGE CONTRACT (Wave 0 task 5; Wave 2 task 1 added entries 4-5)
 // =============================================================================
 // Every cross-context message used by the extension is documented below.
 // Adding a new message type is a two-line change: a new entry in this block
@@ -37,6 +37,25 @@
 //    a job from a non-tab context (manual URL paste, side-panel "add job"
 //    button, etc.) should use a new message type, not overload SAVE_JOB.
 //
+// 4. rr_auth_signin                                       direction: sp -> bg
+//    request:  { type: 'rr_auth_signin' }
+//    response: { ok: true, uid, email, displayName }
+//              | { ok: false, error: 'identity_cancelled' | 'identity_failed'
+//                                   | 'exchange_failed' | 'signin_threw' }
+//    sender:   sp only.   responseStyle: async
+//    Runs chrome.identity.getAuthToken({interactive:true}), exchanges the
+//    Google OAuth token with the Firebase Auth REST API for an id token,
+//    persists the session in chrome.storage.local under rr_user_session.
+//
+// 5. rr_auth_signout                                      direction: sp -> bg
+//    request:  { type: 'rr_auth_signout' }
+//    response: { ok: true } always — sign-out is fail-open so the user can
+//              never end up stuck signed-in client-side.
+//    sender:   sp only.   responseStyle: async
+//    Full revoke: removeCachedAuthToken + POST to oauth2.googleapis.com/revoke
+//    + clears rr_user_session. Next sign-in re-prompts the Google consent
+//    screen.
+//
 // Future events from bg -> sp (capture_complete, save_complete, ...) go
 // through pushPanelEvent so call sites do not need to know the wire format.
 // =============================================================================
@@ -47,6 +66,250 @@
 chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch((err) => console.error('[background] setPanelBehavior failed', err));
+
+// =============================================================================
+// AUTH (Wave 2 task 1 foundation)
+// =============================================================================
+// Google sign-in via chrome.identity, exchanged with Firebase Auth REST API
+// (no SDK bundle, vanilla fetch). Session persisted in chrome.storage.local
+// under rr_user_session.
+//
+// Flow:
+//   1. signIn() runs chrome.identity.getAuthToken({interactive:true}) to get
+//      a Google OAuth access token.
+//   2. exchangeGoogleTokenForFirebase() calls Firebase identitytoolkit
+//      signInWithIdp to swap that for a Firebase id token + refresh token.
+//   3. setSession() writes { uid, email, displayName, idToken,
+//      idTokenExpiresAt, refreshToken } to chrome.storage.local.
+//
+// Per-request auth (rrApiFetch):
+//   - Reads session from storage on every call (SW holds no long-lived state
+//     per CLAUDE_CODE_BRIEFING.md build rules).
+//   - If idTokenExpiresAt is within 5 min, refreshes via securetoken endpoint
+//     before sending the request (lazy refresh).
+//   - On 401 response, refreshes once and retries (handles clock skew or
+//     server-side revocation that the lazy check missed).
+//
+// Sign-out:
+//   - Full revoke: removeCachedAuthToken + POST to oauth2.googleapis.com/revoke
+//   - Clears rr_user_session regardless of revoke success/failure.
+//   - Next sign-in re-prompts the Google consent screen.
+
+const FIREBASE_API_KEY = 'AIzaSyC2bvpBWCA0YZAfZlGyjlAT3GPG2wGnc-o';
+const BACKEND_BASE_URL = 'https://replyrate.ai';
+const FIREBASE_IDP_URL = 'https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key=' + FIREBASE_API_KEY;
+const FIREBASE_TOKEN_URL = 'https://securetoken.googleapis.com/v1/token?key=' + FIREBASE_API_KEY;
+const GOOGLE_REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
+
+// 5-minute refresh window — refresh proactively when within this margin of
+// expiry to avoid sending a stale token. Matches WAVE2_TASK_CONTACTS_SPEC.md
+// line 362.
+const REFRESH_MARGIN_MS = 5 * 60 * 1000;
+
+async function getSession() {
+  const r = await chrome.storage.local.get('rr_user_session');
+  return r.rr_user_session || null;
+}
+
+async function setSession(session) {
+  await chrome.storage.local.set({ rr_user_session: session });
+}
+
+async function clearSession() {
+  await chrome.storage.local.remove('rr_user_session');
+}
+
+// Exchange a Google OAuth access token for a Firebase id token via the
+// Identity Toolkit signInWithIdp endpoint. Returns { uid, email, displayName,
+// idToken, idTokenExpiresAt, refreshToken } or throws.
+async function exchangeGoogleTokenForFirebase(googleAccessToken) {
+  const res = await fetch(FIREBASE_IDP_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      postBody: 'access_token=' + encodeURIComponent(googleAccessToken) + '&providerId=google.com',
+      requestUri: 'http://localhost',
+      returnIdpCredential: true,
+      returnSecureToken: true,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '<read failed>');
+    throw new Error('signInWithIdp ' + res.status + ': ' + text.slice(0, 200));
+  }
+  const data = await res.json();
+  // identitytoolkit returns expiresIn as a string of seconds.
+  const expiresInMs = parseInt(data.expiresIn, 10) * 1000;
+  return {
+    uid: data.localId,
+    email: data.email || null,
+    displayName: data.displayName || null,
+    idToken: data.idToken,
+    idTokenExpiresAt: Date.now() + expiresInMs,
+    refreshToken: data.refreshToken,
+  };
+}
+
+// Refresh a Firebase session using the stored refresh token. Note the case
+// difference: securetoken returns id_token / refresh_token / expires_in
+// (snake_case), unlike identitytoolkit which uses camelCase. We normalize
+// to our session shape on write.
+async function refreshSession(session) {
+  if (!session || !session.refreshToken) throw new Error('no_refresh_token');
+  const body = new URLSearchParams();
+  body.set('grant_type', 'refresh_token');
+  body.set('refresh_token', session.refreshToken);
+  const res = await fetch(FIREBASE_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '<read failed>');
+    throw new Error('refresh ' + res.status + ': ' + text.slice(0, 200));
+  }
+  const data = await res.json();
+  const expiresInMs = parseInt(data.expires_in, 10) * 1000;
+  const refreshed = Object.assign({}, session, {
+    idToken: data.id_token,
+    idTokenExpiresAt: Date.now() + expiresInMs,
+    refreshToken: data.refresh_token || session.refreshToken,
+  });
+  await setSession(refreshed);
+  return refreshed;
+}
+
+// Run the chrome.identity flow → exchange → write session. Returns
+// { ok: true, uid, email, displayName } or { ok: false, error: <code> }.
+// Error codes:
+//   identity_cancelled   user dismissed the consent screen
+//   identity_failed      chrome.identity rejected (bad client_id, network, etc.)
+//   exchange_failed      Firebase signInWithIdp rejected the Google token
+async function signIn() {
+  let googleToken;
+  try {
+    googleToken = await new Promise((resolve, reject) => {
+      chrome.identity.getAuthToken({ interactive: true }, (t) => {
+        const err = chrome.runtime.lastError;
+        if (err) return reject(new Error(err.message || 'identity_error'));
+        if (!t) return reject(new Error('identity_no_token'));
+        resolve(t);
+      });
+    });
+  } catch (err) {
+    const m = (err && err.message) || '';
+    // Heuristic: distinguish user-cancelled vs misconfig/network. Chrome's
+    // exact lastError message varies by version; the substrings checked here
+    // are stable across recent Chrome.
+    if (m.includes('canceled') || m.includes('cancelled') || m.includes('did not approve')) {
+      return { ok: false, error: 'identity_cancelled' };
+    }
+    console.error('[auth] getAuthToken failed:', m);
+    return { ok: false, error: 'identity_failed' };
+  }
+
+  let session;
+  try {
+    session = await exchangeGoogleTokenForFirebase(googleToken);
+  } catch (err) {
+    console.error('[auth] exchange failed:', err.message);
+    return { ok: false, error: 'exchange_failed' };
+  }
+
+  await setSession(session);
+  return { ok: true, uid: session.uid, email: session.email, displayName: session.displayName };
+}
+
+// Full revoke: drop the cached Google token, revoke at oauth2.googleapis.com,
+// clear local session. Always clears local session even if revoke fails (so
+// the user can never end up "stuck signed in" client-side after asking to
+// sign out). Returns { ok: true }.
+async function signOut() {
+  let googleToken = null;
+  try {
+    googleToken = await new Promise((resolve) => {
+      chrome.identity.getAuthToken({ interactive: false }, (t) => {
+        // chrome.runtime.lastError is set if no cached token; that's fine
+        // for sign-out purposes (already not signed in).
+        const _ = chrome.runtime.lastError;
+        resolve(t || null);
+      });
+    });
+  } catch (_) { /* ignore */ }
+
+  if (googleToken) {
+    try {
+      await new Promise((resolve) => {
+        chrome.identity.removeCachedAuthToken({ token: googleToken }, () => resolve());
+      });
+    } catch (err) {
+      console.warn('[auth] removeCachedAuthToken failed:', err && err.message);
+    }
+    try {
+      await fetch(GOOGLE_REVOKE_URL + '?token=' + encodeURIComponent(googleToken), {
+        method: 'POST',
+      });
+    } catch (err) {
+      // Network failure; the user-facing sign-out still succeeds because we
+      // clear local session below. The Google token will eventually expire on
+      // its own (~1hr).
+      console.warn('[auth] revoke POST failed:', err && err.message);
+    }
+  }
+
+  await clearSession();
+  return { ok: true };
+}
+
+// Auth-aware fetch. Reads rr_user_session, refreshes lazily if within the
+// REFRESH_MARGIN_MS window, sends Authorization: Bearer <idToken>, retries
+// once on 401 after a refresh.
+//
+// `path` is a path relative to BACKEND_BASE_URL (e.g., '/api/user/entitlements').
+// `config` is a standard fetch options object; the helper merges in the
+// Authorization header without overwriting other headers, body, or signal.
+async function rrApiFetch(path, config) {
+  let session = await getSession();
+  if (!session) throw new Error('not_signed_in');
+
+  // Lazy refresh: if within 5 min of expiry, refresh first.
+  if (Date.now() + REFRESH_MARGIN_MS > session.idTokenExpiresAt) {
+    try { session = await refreshSession(session); }
+    catch (err) {
+      console.error('[auth] lazy refresh failed:', err.message);
+      throw new Error('refresh_failed');
+    }
+  }
+
+  const url = BACKEND_BASE_URL + path;
+  const baseConfig = config || {};
+  const headers = Object.assign({}, baseConfig.headers || {}, {
+    'Authorization': 'Bearer ' + session.idToken,
+  });
+
+  let res = await fetch(url, Object.assign({}, baseConfig, { headers }));
+
+  // 401 retry: handles clock skew or server-side revocation that the lazy
+  // check missed. Refresh once and retry; if the retry refresh fails, surface
+  // the original 401 to the caller.
+  if (res.status === 401) {
+    try { session = await refreshSession(session); }
+    catch (err) {
+      console.error('[auth] retry refresh failed:', err.message);
+      return res;
+    }
+    const retryHeaders = Object.assign({}, baseConfig.headers || {}, {
+      'Authorization': 'Bearer ' + session.idToken,
+    });
+    res = await fetch(url, Object.assign({}, baseConfig, { headers: retryHeaders }));
+  }
+
+  return res;
+}
+
+// =============================================================================
+// CAPTURE / SAVE FLOW (existing, Wave 0 tasks 7 + 8)
+// =============================================================================
 
 // Wave 0 task 7: capture lives behind a message contract so tasks 6 and 8
 // can reuse it for Lever, Indeed, Greenhouse, Workday by switching on
@@ -312,6 +575,29 @@ function handleCaptureActiveTab(msg, sender, sendResponse) {
   });
 }
 
+function handleAuthSignin(msg, sender, sendResponse) {
+  signIn().then(
+    (res) => sendResponse(res),
+    (err) => {
+      console.error('[auth] signIn threw:', err);
+      sendResponse({ ok: false, error: 'signin_threw' });
+    }
+  );
+}
+
+function handleAuthSignout(msg, sender, sendResponse) {
+  // Spec: rr_auth_signout always returns { ok: true }, even if already signed
+  // out OR if the revoke side-effect fails. Sign-out is fail-open by design
+  // so the client can never end up "stuck signed in" after asking to sign out.
+  signOut().then(
+    (res) => sendResponse(res),
+    (err) => {
+      console.error('[auth] signOut threw:', err);
+      sendResponse({ ok: true });
+    }
+  );
+}
+
 // ---- Dispatch table --------------------------------------------------------
 // Single source of truth for "what message types do we accept and how".
 // Append a row here when adding a new type; the contract block at the top of
@@ -319,6 +605,8 @@ function handleCaptureActiveTab(msg, sender, sendResponse) {
 const MESSAGE_HANDLERS = {
   SAVE_JOB:              { responseStyle: 'async',    requiresTabSender: true,  handler: handleSaveJob },
   rr_capture_active_tab: { responseStyle: 'sync_ack', requiresTabSender: false, handler: handleCaptureActiveTab },
+  rr_auth_signin:        { responseStyle: 'async',    requiresTabSender: false, handler: handleAuthSignin },
+  rr_auth_signout:       { responseStyle: 'async',    requiresTabSender: false, handler: handleAuthSignout },
 };
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

@@ -3,12 +3,14 @@
   "name": "ReplyRate - Save jobs & prep for UK interviews",
   "version": "0.2.0",
   "description": "Save jobs from LinkedIn, Indeed, and Lever to your ReplyRate dashboard. Check UK visa sponsorship, generate tailored CVs and cover letters, practice live mock interviews.",
+  "_comment_oauth2": "BEFORE LOADING THIS EXTENSION: replace __SET_BEFORE_LOAD__ in oauth2.client_id with a real Google OAuth Client ID. To create one: Google Cloud Console -> APIs & Services -> Credentials -> Create Credentials -> OAuth client ID -> Application type: Chrome App -> Application ID: paste the stable extension id shown at chrome://extensions while this extension is load-unpacked. The created client_id ends in .apps.googleusercontent.com. The Firebase project (inboxiq-371b7) must also have Google enabled as a sign-in provider in Firebase Console -> Authentication -> Sign-in method. The _comment_oauth2 field is ignored by Chrome (underscore-prefixed top-level keys are convention for manifest comments).",
   "permissions": [
     "storage",
     "activeTab",
     "scripting",
     "tabs",
-    "sidePanel"
+    "sidePanel",
+    "identity"
   ],
   "host_permissions": [
     "https://www.linkedin.com/*"
@@ -19,6 +21,10 @@
     "https://*.myworkdayjobs.com/*",
     "https://*.indeed.com/*"
   ],
+  "oauth2": {
+    "client_id": "__SET_BEFORE_LOAD__",
+    "scopes": ["openid", "email", "profile"]
+  },
   "background": {
     "service_worker": "background.js",
     "type": "module"

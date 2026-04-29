@@ -1,5 +1,7 @@
 # Wave 2 Task 1: Contacts Tab
 
+> **Spec last verified against deployed backend on 2026-04-29 (commits through `d74ec1d`).** Subsequent backend changes may invalidate UI assumptions documented here; cross-reference current `api/*.js` shape before implementing each section.
+
 ## Purpose
 
 The first paid surface in the extension. Turns saved jobs into actionable outreach by surfacing the right people to contact at each company. After this ships, a user clicks a job in Tracker, switches to Contacts, and sees up to three relevant people (HR/TA, Hiring Manager, optionally a Director) with name, role, location, and LinkedIn URL. Email is gated behind a per-contact unlock backed by Apollo, with a generous free tier and a Stripe upgrade path.
@@ -60,7 +62,7 @@ The Apollo API key never touches the client. Chrome extensions cannot keep secre
 
 `POST /api/apollo-search` already exists in the web app's repo and ships the role-bucketing + email-reveal pipeline (Anthropic Haiku title classification, Apollo `mixed_people/api_search` then `people/match`, then a generic `firstname.lastname@domain` pattern fallback when Apollo returns a name without an email). The task here is REFACTOR, not CREATE: gate the email field behind the unlock endpoint (today the search response can include emails directly), add Firebase auth, restrict CORS to `chrome-extension://<id>`. Treat the role-bucketing logic as load-bearing and do not rebuild it. The legacy code also calls Hunter.io between Apollo and pattern; see "Two-tier email waterfall" decision for why the spec treats Hunter as removed.
 
-There is NO existing auth middleware to reuse. `/api/claude`, `/api/apollo-search`, `/api/hunter-search`, and `/api/apollo-debug` all run unauthenticated today with `Access-Control-Allow-Origin: *`. The first commit of this task BUILDS a shared Firebase Admin auth middleware from scratch and applies it to the new and refactored endpoints.
+Auth middleware (`api/_lib/verifyAuth.js`) shipped in commit `073a3ba` and is now applied to all 7 internal `/api/*` endpoints (commit `ef81abf`). The middleware verifies Firebase id tokens from the `Authorization` header, attaches `uid` to the request via `auth.uid`, and returns 401 on invalid or expired token. CORS is handled separately by `api/_lib/cors.js` (commit `ef81abf` uses both helpers). The Wave 2 Task 1 backend work in this repo is therefore the apollo-search refactor (commit `d74ec1d`, email-strip + email gating behind `/api/contact-unlock`) plus the extension-side wiring described below.
 
 `POST /api/contact-unlock` is greenfield: takes a contactId and jobId, verifies the user has remaining unlocks via Firestore, returns the email already enriched during search (or refetches if the search response was constructed pre-auth), decrements the unlock counter atomically, returns the email.
 
@@ -112,12 +114,12 @@ ContactRecord schema:
 
 - `id`: string. Apollo person id.
 - `name`: string. Display name.
-- `role`: 'hr_ta' | 'hiring_manager' | 'director'. Bucket assigned by Apollo's title-keyword heuristic plus a Claude AI relevance pass (out of scope to detail here; the AI step adds ~200ms per search). Apollo records that cannot be bucketed into one of these three are excluded from the response by the backend, not surfaced to the UI.
+- `role`: 'hr_ta' | 'hiring_manager' | 'director'. **Computed client-side from `contact.title` string** (no backend role field). Lookup table in extension code, ~30 lines: title matches `/recruiter|talent|hr/i` → `hr_ta`; `/manager|lead/i` → `hiring_manager`; `/director|vp|head of/i` → `director`. Backend's `mixed_people/api_search` already returns titles so this is pure string matching. Bucketing is best-effort; contacts whose title doesn't match any bucket are still rendered with their raw `title` and a generic role badge.
 - `title`: string. Their actual job title (e.g., "Senior Talent Partner").
 - `companyName`: string.
 - `location`: string or null. Nullable.
 - `linkedinUrl`: string or null. Apollo sometimes returns wrong or missing URLs; null is a real value.
-- `relevanceScore`: number 0-100. Computed against `rr_user_profile.roleTargets` if present, else flat 50 for all candidates. Used for sort order; not displayed in v1 UI (see Known constraints).
+- `relevanceScore`: number 0-100. **Computed client-side**, not emitted by the backend. Uses `contact.title` matched against `rr_user_profile.roleTargets` if present, else flat 50 for all candidates. Used for sort order; not displayed in v1 UI (see Known constraints). Until `rr_user_profile` exists (Wave 2 task 2), all scores are 50 and sort order falls through to backend default ordering.
 - `email`: string or null. Null until unlocked.
 - `emailUnlockedAt`: number or null. Set on unlock.
 - `confidence`: 'verified' | 'pattern'. Reflects which tier of the email waterfall produced the value. UI renders verified emails normally; pattern emails render the same address with a "We guessed this. Verify first." caveat next to the Copy button.
@@ -203,10 +205,12 @@ All four require a tab sender? No: panel-origin messages have no sender.tab. Set
 
 Out of scope for this commit to implement. Flag the contracts so the build commit knows what to expect:
 
-- **REFACTOR `POST /api/apollo-search`** (already exists; ships role-bucketing + pattern fallback; legacy Hunter.io call between Apollo and pattern is treated as removed for capacity planning, code cleanup is optional). Body unchanged: `{ company, position, level?, location?, jd_text? }`. Apply the new auth middleware. Restrict CORS to `chrome-extension://<id>`. Strip the `email` field from the response (move email reveal to the unlock endpoint). Add `confidence: 'verified' | 'pattern'` field to each contact. Backend continues to filter to at most one candidate per role bucket.
+- **REFACTORED `POST /api/apollo-search`** (DONE, commit `d74ec1d`). Body unchanged: `{ company, position, level?, location?, jd_text? }`. Auth gate applied (commit `ef81abf`). Email field stripped from per-contact response; email reveal moved to `/api/contact-unlock`. Hunter.io overlay removed entirely (Hunter endpoint retained at `/api/hunter-search` for any future use, just not called from apollo-search). Per-contact `confidence: 'verified' | 'pattern'` added — `verified` means Apollo has a deliverable email on file (returned by `/api/contact-unlock`), `pattern` means Apollo has the person but no email (`/api/contact-unlock` will construct `firstname.lastname@<domain>` as a guess). Per-contact `id` field added (Apollo person id, required by `/api/contact-unlock` as `contactId` parameter). Role bucketing is **client-side**, not backend (see line 115). Backend still emits up to 3 verified-tier + 2 pattern-tier contacts (no role-bucket cap); extension applies the cap when rendering.
 - **CREATE `POST /api/contact-unlock`** (greenfield). Body: `{ contactId, jobId }`. Auth header required. Backend verifies the user has remaining unlocks (Firestore lookup), if yes returns the previously-enriched email (or refetches via Apollo `people/match` if the search ran pre-auth), decrements the unlock count atomically, returns `{ ok: true, email }`; if no, returns `{ ok: false, error: 'paywall' }`.
 - **CREATE `GET /api/user/entitlements`** (greenfield). Auth header required. Returns `{ unlocksUsed, unlocksLimit, subscriptionStatus, subscriptionExpiresAt }`. Polled by panel after Stripe checkout completes.
-- **BUILD shared Firebase Admin auth middleware from scratch**. No existing middleware to reuse: `/api/claude`, `/api/apollo-search`, `/api/hunter-search`, and `/api/apollo-debug` all run unauthenticated today. The middleware verifies the Firebase id token from the Authorization header, attaches `uid` to the request, returns 401 on invalid or expired token. Apply to the new and refactored endpoints. Rate limit: 60 requests/min per uid.
+- **DONE: shared Firebase Admin auth middleware** (`api/_lib/verifyAuth.js`, commit `073a3ba`; applied to all 7 internal endpoints in commit `ef81abf`). Verifies the Firebase id token from the `Authorization` header, attaches `uid` to the request, returns 401 on invalid or expired token. Rate limiting: per-endpoint, currently only on `/api/tts` (30/hour, 10/minute, in-memory closed-beta provisional, commit `f4e20af`). Middleware-wide rate limit deferred to public-launch readiness; the Vercel-KV-or-Upstash migration path is documented in the `api/tts.js` comment block.
+
+**Note on `email_required` error code**: Both `/api/user/entitlements` and `/api/contact-unlock` can return `400 { ok: false, error: 'email_required' }` (commit `745d397`). This fires when `ensureUser` detects a phone-only Firebase identity (no `email` field on the verified token). The extension flow uses `chrome.identity.getAuthToken` which always provides Google accounts with email, so `email_required` shouldn't fire via the extension's normal flow. If it does, treat as a configuration error and prompt the user to sign out and sign back in via the standard Google flow.
 
 ## Acceptance checklist before shipping
 
@@ -363,19 +367,19 @@ This task does NOT depend on Wave 2 tasks 2-4 to ship. Contacts works standalone
 
 - **OAuth manifest config**: `chrome.identity.getAuthToken` requires `"oauth2": { "client_id": "...", "scopes": [...] }` in manifest.json. Adds an installation-time client_id; users see a Google sign-in consent screen on first sign-in. Manifest update is part of this task's first commit.
 
-- **CORS for chrome-extension origin**: Vercel functions must allow `chrome-extension://<id>` explicitly in their CORS config. Cannot use `*` (Stripe webhooks and other endpoints would break). Document in the backend deploy notes.
+- **CORS for chrome-extension origin**: `api/_lib/cors.js` reads the `ALLOWED_EXTENSION_ORIGIN` env var and sets `Access-Control-Allow-Origin` accordingly; falls back to `*` with a console.warn when unset. **Currently unset** (production traffic still gets the wildcard). Must be set to `chrome-extension://<id>` in Vercel project settings before Chrome Web Store submission. Stripe webhooks are unaffected (separate endpoint, not under `/api/_lib/cors.js`).
 
 - **Stripe checkout return**: the extension cannot listen for Stripe's redirect (no web tab to land on). User completes purchase in the new Stripe tab; panel polls `/api/user/entitlements` on next render. There may be a 1-2 second window where the user has paid but the panel still shows the paywall. Acceptable; no spec change needed.
 
 ## Pre-build cleanup
 
-Three small commits to land in the `replyrate` web app repo before (or alongside) the Wave 2 task 1 build commit. They are independent of the auth middleware build but cleanly precede or accompany it:
+All three pre-build cleanup items are DONE in the `replyrate` web app repo:
 
-- **Auth check on `/api/claude`**: currently unauthenticated. The proxy will silently leak the ANTHROPIC_API_KEY budget if the extension ID gets out, since CORS allows `*` and there is no token check. Apply the new Firebase auth middleware once it lands. Sequence as the second web-app commit, immediately after the middleware itself.
-- **Remove or gate `/api/apollo-debug`**: the debug helper leaks the first 12 chars of `APOLLO_API_KEY` in its response body via the `apollo_key_prefix` field. Either delete the file or gate it behind an `ADMIN_KEY` env var check. Either way, nothing in the extension calls it.
-- **Fix `/api/claude` CORS bug**: `Access-Control-Allow-Origin: *` is set only on the OPTIONS preflight branch. The POST response is missing the header, so a browser preflight succeeds while the actual POST is blocked when the response is read. Move the CORS headers to fire on every response, not just OPTIONS.
+- **DONE: Auth check on `/api/claude`** (commit `073a3ba`). Firebase id token verification gates the endpoint; ANTHROPIC_API_KEY budget no longer drainable by anonymous callers. Wave 2 (commit `ef81abf`) extended the same gate to all 6 other internal endpoints.
+- **DONE: `/api/apollo-debug` removed** (commit `8b61afd`). The debug helper that leaked the first 12 chars of `APOLLO_API_KEY` was deleted entirely rather than gated.
+- **DONE: `/api/claude` CORS bug fixed** (commit `ef81abf`). The `api/_lib/cors.js` helper applies CORS headers on every response, not just OPTIONS. All 7 internal endpoints route through it.
 
-These ship as their own commits and are not part of the Wave 2 task 1 build effort.
+No further pre-build cleanup needed. Wave 2 task 1 build can proceed directly against the deployed backend.
 
 ## Things this spec does NOT decide
 

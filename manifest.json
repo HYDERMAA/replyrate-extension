@@ -22,7 +22,7 @@
     "https://*.indeed.com/*"
   ],
   "oauth2": {
-    "client_id": "__SET_BEFORE_LOAD__",
+    "client_id": "516431405635-v1tn844hv1nkjnm401mt7c24mlff6h83.apps.googleusercontent.com",
     "scopes": ["openid", "email", "profile"]
   },
   "background": {

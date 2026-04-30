@@ -48,6 +48,8 @@ const ICONS = {
   chartLine:      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M232,208a8,8,0,0,1-8,8H32a8,8,0,0,1-8-8V48a8,8,0,0,1,16,0v94.37L90.73,98a8,8,0,0,1,10.07-.38l58.81,44.11L218.73,90a8,8,0,1,1,10.54,12l-64,56a8,8,0,0,1-10.07.38L96.39,114.29,40,163.63V200H224A8,8,0,0,1,232,208Z"/></svg>',
   // Wave 1 task 9 part 5: hand-rolled three-dot icon for OverflowMenu trigger.
   dotsThreeVertical: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><circle cx="12" cy="6" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="18" r="2"/></svg>',
+  // Wave 2 task 1 continuation: external-link icon for ContactCard's LinkedIn link.
+  arrowSquareOut: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M200,64V168a8,8,0,0,1-16,0V83.31L69.66,197.66a8,8,0,0,1-11.32-11.32L172.69,72H88a8,8,0,0,1,0-16H192A8,8,0,0,1,200,64Z"/></svg>',
 };
 
 // Map tab id -> Phosphor icon. Spec table names "home" and "clipboard-list";
@@ -144,7 +146,7 @@ const STRINGS = {
       retry:   'Retry',
     },
   },
-  // Wave 2 task 1: contacts tab + auth widget copy.
+  // Wave 2 task 1 + continuation: contacts tab + auth widget copy.
   contacts: {
     signedOut: {
       heading: 'Sign in to find contacts',
@@ -163,7 +165,44 @@ const STRINGS = {
       upgrade:     'Upgrade',
     },
     emptyHint:    'Pick a job above to find contacts at that company.',
-    findContacts: 'Find contacts',
+    search: {
+      heading:           'Find contacts at this company',
+      companyLabel:      'Company',
+      positionLabel:     'Position',
+      submit:            'Search contacts',
+      searching:         'Searching…',
+      errorEmptyInputs:  'Enter both company and position.',
+      errorGeneric:      "Couldn't search Apollo. Try again.",
+    },
+    list: {
+      contextSeparator: ' · ',
+      newSearch:        'New search',
+      empty: {
+        heading:    (company) => 'No contacts found at ' + company,
+        body:       'Try different keywords or check the company name.',
+        editSearch: 'Edit search',
+      },
+    },
+    card: {
+      unlockVerified:      'Unlock email (1 credit)',
+      unlockPattern:       'Reveal guessed email (1 credit)',
+      unlocking:           'Unlocking…',
+      copy:                'Copy',
+      copied:              'Copied!',
+      patternCaveat:       'Pattern-matched guess. Verify before sending.',
+      errorGeneric:        "Couldn't reveal. Try again.",
+      errorDb:             'Something went wrong. Try again.',
+      paywallText:         'Out of unlocks.',
+      paywallUpgrade:      'Upgrade',
+      openLinkedIn:        'Open in LinkedIn',
+      role: {
+        hr_ta:                  'HR / TA',
+        hiring_manager:         'Hiring Manager',
+        director:               'Director',
+        individual_contributor: 'Individual Contributor',
+        unknown:                'Other',
+      },
+    },
   },
   auth: {
     signIn:       'Sign in',
@@ -372,6 +411,109 @@ async function fetchEntitlements(state) {
     console.warn('[panel] entitlements fetch failed:', err && err.message);
     state.setEntitlements(null);
   }
+}
+
+// ── Wave 2 task 1 continuation: parsing + role bucketing + cache helpers ───
+
+// Best-effort parse of a JobLead.title into { company, position }. Strips
+// common platform suffixes (LinkedIn, Indeed) before matching, then tries
+// "Position at Company" then "Position - Company" / "Position | Company"
+// patterns. Returns empty fields for unparseable titles; user fills them
+// in the SearchForm. Pre-fill is convenience, not authoritative.
+function parseJobTitle(title) {
+  if (!title) return { company: '', position: '' };
+  const cleaned = title
+    .replace(/\s*\|\s*LinkedIn$/i, '')
+    .replace(/\s*-\s*LinkedIn$/i, '')
+    .replace(/\s*\|\s*Indeed.*$/i, '')
+    .replace(/\s*-\s*Indeed.*$/i, '')
+    .trim();
+  // Pattern 1: "Position at Company" (Lever, common ATS).
+  let m = cleaned.match(/^(.+?)\s+at\s+(.+?)(\s*[-|·•].*)?$/i);
+  if (m) return { position: m[1].trim(), company: m[2].trim() };
+  // Pattern 2: "Position - Company" / "Position | Company" / "Position · Company".
+  m = cleaned.match(/^(.+?)\s*[-|·•]\s*(.+?)(\s*[-|·•].*)?$/);
+  if (m) return { position: m[1].trim(), company: m[2].trim() };
+  // Fallback: assume the whole title is the position; user fills company.
+  return { position: cleaned, company: '' };
+}
+
+// Map a job title string to an internal role bucket. Director check first
+// so "Director of Engineering" doesn't fall through to manager. Used by
+// ContactCard to render the small role label under the contact's title.
+function mapTitleToRole(title) {
+  if (!title) return 'unknown';
+  const t = title.toLowerCase();
+  if (/\b(director|vp|vice president|head of|chief|founder)\b/.test(t)) return 'director';
+  if (/\b(recruiter|talent|people|hr)\b/.test(t)) return 'hr_ta';
+  if (/\b(manager|lead)\b/.test(t)) return 'hiring_manager';
+  if (/\b(engineer|developer|designer|analyst|specialist|consultant|associate)\b/.test(t)) return 'individual_contributor';
+  return 'unknown';
+}
+
+// Read a single JobLead by id from chrome.storage.local. Used by
+// ContactsContent to pre-fill SearchForm with parseJobTitle output.
+async function getJobLeadById(jobId) {
+  if (!jobId) return null;
+  const key = 'rr_job_' + jobId;
+  const data = await chrome.storage.local.get(key);
+  return data[key] || null;
+}
+
+// Per-spec rr_contacts_<jobId> cache.
+//
+// Shape:
+//   { searchedAt: number,        // Date.now() at write
+//     company: string,           // user-confirmed company sent to apollo-search
+//     position: string,          // user-confirmed position sent to apollo-search
+//     contacts: [
+//       { id, name, first_name, last_name, title, linkedin_url,
+//         location, photo_url, confidence, source, is_real,
+//         email?,        // present after successful unlock
+//         unlockedAt?,   // present after successful unlock
+//       }
+//     ]
+//   }
+//
+// 7-day TTL. Stale entries are treated as cache miss (user lands on
+// SearchForm). Stale-while-revalidate background refetch is documented
+// as deferred — current behavior is simpler stale-as-miss.
+const CONTACTS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+function contactsCacheKey(jobId) { return 'rr_contacts_' + jobId; }
+
+async function readContactsCache(jobId) {
+  if (!jobId) return null;
+  const key = contactsCacheKey(jobId);
+  const data = await chrome.storage.local.get(key);
+  return data[key] || null;
+}
+
+async function writeContactsCache(jobId, payload) {
+  if (!jobId) return;
+  const key = contactsCacheKey(jobId);
+  await chrome.storage.local.set({ [key]: payload });
+}
+
+// Merge unlock fields (email + unlockedAt) into the existing contact entry
+// in the cache. Doesn't overwrite the contacts array — finds the entry by
+// contactId and assigns email/unlockedAt onto it. Idempotent: subsequent
+// unlocks of the same contactId update in place. No-op if cache or entry
+// missing (e.g., user cleared storage between search and unlock).
+async function updateUnlockedContact(jobId, contactId, email) {
+  const cache = await readContactsCache(jobId);
+  if (!cache || !Array.isArray(cache.contacts)) return;
+  const idx = cache.contacts.findIndex((c) => c && c.id === contactId);
+  if (idx < 0) return;
+  cache.contacts[idx] = Object.assign({}, cache.contacts[idx], {
+    email: email,
+    unlockedAt: Date.now(),
+  });
+  await writeContactsCache(jobId, cache);
+}
+
+function isStaleCache(cache) {
+  if (!cache || !cache.searchedAt) return true;
+  return (Date.now() - cache.searchedAt) >= CONTACTS_CACHE_TTL_MS;
 }
 
 // ── Wave 1 task 9 part 1: modules ──────────────────────────────────────────
@@ -2095,19 +2237,460 @@ function EntitlementsBar(parent, state) {
   };
 }
 
-function FindContactsButton(parent, state) {
+// ── Wave 2 task 1 continuation: search form, contact list, contact card ───
+
+function SearchForm(parent, state, options) {
+  // options: { initialCompany, initialPosition, onSearchSuccess }
+  options = options || {};
+  const root = document.createElement('div');
+  root.className = 'rr-search-form';
+
+  const heading = document.createElement('h3');
+  heading.className = 'rr-search-form-heading';
+  heading.textContent = STRINGS.contacts.search.heading;
+  root.appendChild(heading);
+
+  const companyLabel = document.createElement('label');
+  companyLabel.className = 'rr-search-form-label';
+  companyLabel.textContent = STRINGS.contacts.search.companyLabel;
+  companyLabel.htmlFor = 'rr-search-company';
+  root.appendChild(companyLabel);
+  const companyInput = document.createElement('input');
+  companyInput.type = 'text';
+  companyInput.className = 'rr-search-form-input';
+  companyInput.id = 'rr-search-company';
+  companyInput.value = options.initialCompany || '';
+  root.appendChild(companyInput);
+
+  const positionLabel = document.createElement('label');
+  positionLabel.className = 'rr-search-form-label';
+  positionLabel.textContent = STRINGS.contacts.search.positionLabel;
+  positionLabel.htmlFor = 'rr-search-position';
+  root.appendChild(positionLabel);
+  const positionInput = document.createElement('input');
+  positionInput.type = 'text';
+  positionInput.className = 'rr-search-form-input';
+  positionInput.id = 'rr-search-position';
+  positionInput.value = options.initialPosition || '';
+  root.appendChild(positionInput);
+
   const btn = document.createElement('button');
   btn.type = 'button';
-  btn.className = 'rr-btn rr-find-contacts-btn';
-  btn.textContent = STRINGS.contacts.findContacts;
-  btn.addEventListener('click', () => {
-    const id = state.getSelectedJobId();
-    // No-op tonight — Apollo wiring lands in the next commit. Logged so the
-    // SW console shows the button is reachable end-to-end.
-    console.log('[contacts] find-contacts clicked, deferred. selectedJobId=' + id);
+  btn.className = 'rr-btn rr-search-form-submit';
+  btn.textContent = STRINGS.contacts.search.submit;
+  root.appendChild(btn);
+
+  const errorPill = document.createElement('div');
+  errorPill.className = 'rr-search-form-error';
+  errorPill.style.display = 'none';
+  errorPill.setAttribute('role', 'alert');
+  root.appendChild(errorPill);
+
+  let isPending = false;
+  let unmounted = false;
+
+  function showError(msg) {
+    errorPill.textContent = msg;
+    errorPill.style.display = 'block';
+  }
+  function clearError() {
+    errorPill.style.display = 'none';
+    errorPill.textContent = '';
+  }
+
+  async function onSubmit() {
+    if (isPending || unmounted) return;
+    const company = companyInput.value.trim();
+    const position = positionInput.value.trim();
+    if (!company || !position) {
+      showError(STRINGS.contacts.search.errorEmptyInputs);
+      return;
+    }
+    clearError();
+    isPending = true;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="rr-spinner rr-spinner-inline" aria-hidden="true"></span>' + STRINGS.contacts.search.searching;
+
+    try {
+      const res = await rrPanelFetch('/api/apollo-search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ company: company, position: position }),
+      });
+      if (unmounted) return;
+      if (!res.ok) {
+        showError(STRINGS.contacts.search.errorGeneric);
+        return;
+      }
+      const data = await res.json();
+      const all = (data && Array.isArray(data.contacts)) ? data.contacts : [];
+      // Filter out the synthetic placeholder (is_real:false / id:null) the
+      // backend emits when zero real contacts found. Empty results render
+      // the "No contacts found" empty state inside ContactList.
+      const real = all.filter((c) => c && c.is_real && c.id);
+      if (typeof options.onSearchSuccess === 'function') {
+        options.onSearchSuccess({ company: company, position: position, contacts: real });
+      }
+    } catch (err) {
+      if (err && err.message === 'not_signed_in') return; // session subscriber will handle
+      showError(STRINGS.contacts.search.errorGeneric);
+    } finally {
+      if (!unmounted) {
+        isPending = false;
+        btn.disabled = false;
+        btn.textContent = STRINGS.contacts.search.submit;
+      }
+    }
+  }
+
+  function onKeydown(event) {
+    if (event.key === 'Enter') { event.preventDefault(); onSubmit(); }
+  }
+
+  btn.addEventListener('click', onSubmit);
+  companyInput.addEventListener('keydown', onKeydown);
+  positionInput.addEventListener('keydown', onKeydown);
+
+  parent.appendChild(root);
+
+  return function unmount() {
+    unmounted = true;
+    btn.removeEventListener('click', onSubmit);
+    companyInput.removeEventListener('keydown', onKeydown);
+    positionInput.removeEventListener('keydown', onKeydown);
+    root.remove();
+  };
+}
+
+function ContactCard(parent, state, contact, options) {
+  // options: { jobId }
+  options = options || {};
+  const root = document.createElement('div');
+  root.className = 'rr-contact-card';
+
+  // Avatar (photo_url img with first-letter circle fallback).
+  const avatar = document.createElement('div');
+  avatar.className = 'rr-contact-avatar';
+  avatar.setAttribute('aria-hidden', 'true');
+  if (contact.photo_url) {
+    const img = document.createElement('img');
+    img.src = contact.photo_url;
+    img.alt = '';
+    img.referrerPolicy = 'no-referrer';
+    img.onerror = () => {
+      // photo_url 404'd / blocked / hotlink-protected; fall back to initial.
+      if (img.parentNode === avatar) avatar.removeChild(img);
+      avatar.textContent = (contact.name || '?').charAt(0).toUpperCase();
+    };
+    avatar.appendChild(img);
+  } else {
+    avatar.textContent = (contact.name || '?').charAt(0).toUpperCase();
+  }
+  root.appendChild(avatar);
+
+  const body = document.createElement('div');
+  body.className = 'rr-contact-body';
+
+  // Header row: name + confidence badge + LinkedIn icon.
+  const headerRow = document.createElement('div');
+  headerRow.className = 'rr-contact-header';
+
+  const name = document.createElement('span');
+  name.className = 'rr-contact-name';
+  name.textContent = contact.name || '(unknown)';
+  headerRow.appendChild(name);
+
+  const badge = document.createElement('span');
+  badge.className = 'rr-confidence-badge rr-confidence-' + (contact.confidence || 'pattern');
+  badge.textContent = contact.confidence === 'verified' ? 'verified' : 'pattern';
+  headerRow.appendChild(badge);
+
+  if (contact.linkedin_url) {
+    const link = document.createElement('a');
+    link.href = contact.linkedin_url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.className = 'rr-contact-linkedin';
+    link.title = STRINGS.contacts.card.openLinkedIn;
+    link.setAttribute('aria-label', STRINGS.contacts.card.openLinkedIn);
+    link.innerHTML = ICONS.arrowSquareOut;
+    headerRow.appendChild(link);
+  }
+
+  body.appendChild(headerRow);
+
+  // Title.
+  if (contact.title) {
+    const titleEl = document.createElement('div');
+    titleEl.className = 'rr-contact-title-text';
+    titleEl.textContent = contact.title;
+    body.appendChild(titleEl);
+  }
+
+  // Meta row: bucketed role + location.
+  const meta = document.createElement('div');
+  meta.className = 'rr-contact-meta';
+  const roleKey = mapTitleToRole(contact.title);
+  const roleLabel = STRINGS.contacts.card.role[roleKey] || STRINGS.contacts.card.role.unknown;
+  const roleEl = document.createElement('span');
+  roleEl.className = 'rr-contact-role';
+  roleEl.textContent = roleLabel;
+  meta.appendChild(roleEl);
+  if (contact.location) {
+    const sep = document.createElement('span');
+    sep.textContent = ' · ';
+    meta.appendChild(sep);
+    const locEl = document.createElement('span');
+    locEl.className = 'rr-contact-location';
+    locEl.textContent = contact.location;
+    meta.appendChild(locEl);
+  }
+  body.appendChild(meta);
+
+  // Action row (rendered by renderAction; rebuilt on state change).
+  const actionRow = document.createElement('div');
+  actionRow.className = 'rr-contact-action-row';
+  body.appendChild(actionRow);
+
+  root.appendChild(body);
+
+  // Local state. NOT in appState — UI-local to this card only.
+  let isUnlocking = false;
+  let isPaywalled = false;
+  let unlockError = null;
+  let unlockErrorTimer = null;
+  let copyTimer = null;
+  // Email may be pre-loaded from cache (previously unlocked); preserve it.
+  let unlockedEmail = contact.email || null;
+  let unmounted = false;
+
+  function clearUnlockError() {
+    if (unlockErrorTimer) { clearTimeout(unlockErrorTimer); unlockErrorTimer = null; }
+    unlockError = null;
+    if (!unmounted) renderAction();
+  }
+  function showUnlockError(msg) {
+    unlockError = msg;
+    if (unlockErrorTimer) clearTimeout(unlockErrorTimer);
+    unlockErrorTimer = setTimeout(clearUnlockError, 5000);
+    renderAction();
+  }
+
+  function renderAction() {
+    actionRow.innerHTML = '';
+    if (unlockedEmail) {
+      // Revealed state.
+      const emailEl = document.createElement('span');
+      emailEl.className = 'rr-contact-email';
+      emailEl.textContent = unlockedEmail;
+      actionRow.appendChild(emailEl);
+
+      const copyBtn = document.createElement('button');
+      copyBtn.type = 'button';
+      copyBtn.className = 'rr-link rr-contact-copy';
+      copyBtn.textContent = STRINGS.contacts.card.copy;
+      copyBtn.addEventListener('click', () => {
+        try {
+          navigator.clipboard.writeText(unlockedEmail);
+          copyBtn.textContent = STRINGS.contacts.card.copied;
+          if (copyTimer) clearTimeout(copyTimer);
+          copyTimer = setTimeout(() => {
+            if (!unmounted) copyBtn.textContent = STRINGS.contacts.card.copy;
+            copyTimer = null;
+          }, 1500);
+        } catch (e) {
+          console.error('[card] copy failed', e);
+        }
+      });
+      actionRow.appendChild(copyBtn);
+
+      if (contact.confidence === 'pattern') {
+        const caveat = document.createElement('div');
+        caveat.className = 'rr-pattern-caveat';
+        caveat.textContent = STRINGS.contacts.card.patternCaveat;
+        actionRow.appendChild(caveat);
+      }
+    } else if (isPaywalled) {
+      const paywall = document.createElement('div');
+      paywall.className = 'rr-contact-paywall';
+      const text = document.createElement('span');
+      text.textContent = STRINGS.contacts.card.paywallText + ' ';
+      paywall.appendChild(text);
+      const upgradeBtn = document.createElement('button');
+      upgradeBtn.type = 'button';
+      upgradeBtn.className = 'rr-link';
+      upgradeBtn.textContent = STRINGS.contacts.card.paywallUpgrade;
+      upgradeBtn.addEventListener('click', () => {
+        chrome.storage.local.get('rr_user_session').then((data) => {
+          const session = data.rr_user_session;
+          if (!session || !session.uid) return;
+          const url = STRIPE_CHECKOUT_URL_BASE + '?client_reference_id=' + encodeURIComponent(session.uid);
+          chrome.tabs.create({ url, active: true })
+            .catch((err) => console.error('[card] tabs.create failed', err));
+        });
+      });
+      paywall.appendChild(upgradeBtn);
+      actionRow.appendChild(paywall);
+    } else {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'rr-btn rr-unlock-btn';
+      btn.disabled = isUnlocking;
+      if (isUnlocking) {
+        btn.innerHTML = '<span class="rr-spinner rr-spinner-inline" aria-hidden="true"></span>' + STRINGS.contacts.card.unlocking;
+      } else {
+        btn.textContent = contact.confidence === 'verified'
+          ? STRINGS.contacts.card.unlockVerified
+          : STRINGS.contacts.card.unlockPattern;
+        btn.addEventListener('click', onUnlockClick);
+      }
+      actionRow.appendChild(btn);
+
+      if (unlockError) {
+        const pill = document.createElement('div');
+        pill.className = 'rr-contact-error-pill';
+        pill.setAttribute('role', 'alert');
+        pill.textContent = unlockError;
+        actionRow.appendChild(pill);
+      }
+    }
+  }
+
+  async function onUnlockClick() {
+    if (isUnlocking) return;
+    isUnlocking = true;
+    if (unlockErrorTimer) { clearTimeout(unlockErrorTimer); unlockErrorTimer = null; }
+    unlockError = null;
+    renderAction();
+
+    try {
+      const res = await rrPanelFetch('/api/contact-unlock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contactId: contact.id, jobId: options.jobId }),
+      });
+      if (unmounted) return;
+
+      if (res.status === 402) {
+        isUnlocking = false;
+        isPaywalled = true;
+        renderAction();
+        return;
+      }
+      if (!res.ok) {
+        isUnlocking = false;
+        const msg = res.status === 500
+          ? STRINGS.contacts.card.errorDb
+          : STRINGS.contacts.card.errorGeneric;
+        showUnlockError(msg);
+        return;
+      }
+
+      const data = await res.json();
+      if (!data || data.ok !== true || !data.email) {
+        isUnlocking = false;
+        showUnlockError(STRINGS.contacts.card.errorGeneric);
+        return;
+      }
+
+      unlockedEmail = data.email;
+      isUnlocking = false;
+      renderAction();
+
+      // Persist to cache so re-renders (and panel reload) show the unlocked
+      // state without re-spending a credit. Fire-and-forget; UI is already
+      // updated.
+      updateUnlockedContact(options.jobId, contact.id, data.email)
+        .catch((err) => console.error('[card] cache update failed', err));
+
+      // Refresh entitlements counter (server-side increment happened during
+      // unlock; pull the fresh value into appState so EntitlementsBar repaints).
+      fetchEntitlements(state)
+        .catch((err) => console.error('[card] entitlements refresh failed', err));
+    } catch (err) {
+      isUnlocking = false;
+      if (err && err.message === 'not_signed_in') return; // session subscriber will handle
+      showUnlockError(STRINGS.contacts.card.errorGeneric);
+    }
+  }
+
+  renderAction();
+  parent.appendChild(root);
+
+  return function unmount() {
+    unmounted = true;
+    // Clear timers to prevent leaks (unlockErrorTimer auto-clear, copy timer revert).
+    if (unlockErrorTimer) { clearTimeout(unlockErrorTimer); unlockErrorTimer = null; }
+    if (copyTimer)        { clearTimeout(copyTimer);        copyTimer = null; }
+    root.remove();
+  };
+}
+
+function ContactList(parent, state, options) {
+  // options: { jobId, company, position, contacts, onNewSearch, onEditSearch }
+  options = options || {};
+  const root = document.createElement('div');
+  root.className = 'rr-contact-list-wrap';
+
+  // Context bar: "Stripe · Senior Engineer · [New search]"
+  const contextBar = document.createElement('div');
+  contextBar.className = 'rr-context-bar';
+  const contextText = document.createElement('span');
+  contextText.textContent =
+    options.company +
+    STRINGS.contacts.list.contextSeparator +
+    options.position +
+    STRINGS.contacts.list.contextSeparator;
+  contextBar.appendChild(contextText);
+  const newSearchLink = document.createElement('button');
+  newSearchLink.type = 'button';
+  newSearchLink.className = 'rr-link rr-context-bar-link';
+  newSearchLink.textContent = STRINGS.contacts.list.newSearch;
+  newSearchLink.addEventListener('click', () => {
+    if (typeof options.onNewSearch === 'function') options.onNewSearch();
   });
-  parent.appendChild(btn);
-  return function unmount() { btn.remove(); };
+  contextBar.appendChild(newSearchLink);
+  root.appendChild(contextBar);
+
+  const cardHandles = [];
+  const contacts = Array.isArray(options.contacts) ? options.contacts : [];
+
+  if (contacts.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'rr-contact-list-empty';
+    const heading = document.createElement('h2');
+    heading.className = 'rr-empty-heading';
+    heading.textContent = STRINGS.contacts.list.empty.heading(options.company);
+    empty.appendChild(heading);
+    const body = document.createElement('p');
+    body.className = 'rr-empty-body';
+    body.textContent = STRINGS.contacts.list.empty.body;
+    empty.appendChild(body);
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'rr-btn rr-signin-prompt-action';
+    editBtn.textContent = STRINGS.contacts.list.empty.editSearch;
+    editBtn.addEventListener('click', () => {
+      if (typeof options.onEditSearch === 'function') options.onEditSearch();
+    });
+    empty.appendChild(editBtn);
+    root.appendChild(empty);
+  } else {
+    const listEl = document.createElement('div');
+    listEl.className = 'rr-contact-list';
+    contacts.forEach((contact) => {
+      const handle = ContactCard(listEl, state, contact, { jobId: options.jobId });
+      cardHandles.push(handle);
+    });
+    root.appendChild(listEl);
+  }
+
+  parent.appendChild(root);
+
+  return function unmount() {
+    cardHandles.forEach((h) => { try { h(); } catch (e) {} });
+    root.remove();
+  };
 }
 
 function ContactsContent(parent, state) {
@@ -2121,22 +2704,129 @@ function ContactsContent(parent, state) {
   const lowerArea = document.createElement('div');
   root.appendChild(lowerArea);
 
+  // ContactsContent state machine for the lower area:
+  //   no selectedJobId          → ContactsEmptyHint
+  //   selectedJobId, fresh cache → ContactList
+  //   selectedJobId, no cache OR stale (>=7d) → SearchForm
+  //   selectedJobId, forceShowForm flag        → SearchForm (set by New search / Edit search)
+  //
+  // Stale = treat as miss. Stale-while-revalidate (background refetch +
+  // "Last refreshed N days ago" hint) is documented as deferred — current
+  // behavior is simpler stale-as-miss.
   let lowerHandle = null;
-  function renderLower() {
-    if (lowerHandle) { lowerHandle(); lowerHandle = null; }
+  let unmounted = false;
+  let currentJobId = null;
+  let forceShowForm = false;
+
+  function teardownLower() {
+    if (lowerHandle) { try { lowerHandle(); } catch (e) {} lowerHandle = null; }
+  }
+
+  function mountSearchForm(initial) {
+    teardownLower();
+    lowerHandle = SearchForm(lowerArea, state, {
+      initialCompany: initial.company || '',
+      initialPosition: initial.position || '',
+      onSearchSuccess: (result) => {
+        // Persist fresh cache then mount the list view.
+        const cachePayload = {
+          searchedAt: Date.now(),
+          company: result.company,
+          position: result.position,
+          contacts: result.contacts,
+        };
+        writeContactsCache(currentJobId, cachePayload)
+          .catch((err) => console.error('[contacts] cache write failed', err));
+        forceShowForm = false;
+        mountList(cachePayload);
+      },
+    });
+  }
+
+  function mountList(cache) {
+    teardownLower();
+    lowerHandle = ContactList(lowerArea, state, {
+      jobId: currentJobId,
+      company: cache.company,
+      position: cache.position,
+      contacts: cache.contacts,
+      onNewSearch: () => {
+        // "New search" bypasses the cache (does NOT clear it). Pre-fill
+        // from the cached company/position so the user can edit and resubmit.
+        // Cache is overwritten only when a new search succeeds.
+        forceShowForm = true;
+        mountSearchForm({
+          company: cache.company || '',
+          position: cache.position || '',
+        });
+      },
+      onEditSearch: () => {
+        // Empty results: user wants to edit and try again.
+        forceShowForm = true;
+        mountSearchForm({
+          company: cache.company || '',
+          position: cache.position || '',
+        });
+      },
+    });
+  }
+
+  function mountEmptyHint() {
+    teardownLower();
+    lowerHandle = ContactsEmptyHint(lowerArea);
+  }
+
+  async function renderLower() {
+    if (unmounted) return;
     const id = state.getSelectedJobId();
-    if (id) {
-      lowerHandle = FindContactsButton(lowerArea, state);
+    currentJobId = id;
+    if (!id) {
+      forceShowForm = false;
+      mountEmptyHint();
+      return;
+    }
+
+    if (forceShowForm) {
+      // Already showing form via mountSearchForm in onNewSearch / onEditSearch;
+      // no need to remount.
+      return;
+    }
+
+    let cache = null;
+    try { cache = await readContactsCache(id); }
+    catch (err) { console.error('[contacts] cache read failed', err); }
+    if (unmounted) return;
+    if (id !== state.getSelectedJobId()) return; // selectedJobId changed mid-read
+
+    if (cache && !isStaleCache(cache)) {
+      mountList(cache);
     } else {
-      lowerHandle = ContactsEmptyHint(lowerArea);
+      // No cache, or stale. Pre-fill form from the JobLead title parser.
+      let parsed = { company: '', position: '' };
+      try {
+        const job = await getJobLeadById(id);
+        if (job && job.title) parsed = parseJobTitle(job.title);
+      } catch (err) {
+        console.error('[contacts] job read failed', err);
+      }
+      if (unmounted || id !== state.getSelectedJobId()) return;
+      mountSearchForm(parsed);
     }
   }
+
   renderLower();
-  const unsubscribeJobId = state.subscribeSelectedJobId(renderLower);
+  const unsubscribeJobId = state.subscribeSelectedJobId(() => {
+    // Switching to a different job resets the form-flag — fresh job gets
+    // its own cache lookup, not the stale forceShowForm intent from a
+    // prior job.
+    forceShowForm = false;
+    renderLower();
+  });
 
   return function unmount() {
+    unmounted = true;
     unsubscribeJobId();
-    if (lowerHandle) lowerHandle();
+    teardownLower();
     if (entitlementsHandle) entitlementsHandle();
     if (pickerHandle) pickerHandle();
     root.remove();

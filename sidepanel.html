@@ -546,6 +546,197 @@
   }
   .rr-tracker-error-heading { margin: 0; font-size: 14px; font-weight: 600; color: var(--text); }
   .rr-tracker-error-detail  { margin: 0; font-size: 12px; color: var(--text-muted); max-width: 280px; line-height: 1.5; }
+
+  /* Wave 2 task 1: header user menu, contacts auth scaffold. */
+
+  .rr-user-menu {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+  }
+
+  .rr-user-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: none;
+    border: none;
+    border-radius: 8px;
+    padding: 4px 8px;
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+  }
+  .rr-user-trigger:hover { background-color: var(--surface); }
+  .rr-user-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .rr-user-trigger::after {
+    content: '';
+    width: 0; height: 0;
+    border-left: 3px solid transparent;
+    border-right: 3px solid transparent;
+    border-top: 3px solid currentColor;
+    flex-shrink: 0;
+  }
+
+  .rr-user-avatar {
+    width: 24px; height: 24px;
+    display: grid; place-items: center;
+    background: var(--accent);
+    color: var(--accent-text);
+    border-radius: 50%;
+    font-weight: 700;
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+
+  .rr-user-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    max-width: 100px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Static menu item (email row in user menu): not clickable. */
+  .rr-menu-static {
+    color: var(--text-muted);
+    font-size: 12px;
+    cursor: default;
+  }
+  .rr-menu-static:hover,
+  .rr-menu-static.rr-menuitem-active { background-color: transparent; }
+
+  /* Sign-in inline error pill (header signed-out state). */
+  .rr-user-error {
+    font-size: 10px;
+    font-weight: 600;
+    color: #ffffff;
+    background: var(--error);
+    padding: 2px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* SignInPrompt: extends .rr-empty with primary action button. */
+  .rr-signin-prompt-action {
+    margin-top: 8px;
+    background: var(--accent);
+    color: var(--accent-text);
+    border-color: var(--accent);
+  }
+  .rr-signin-prompt-action:hover {
+    opacity: 0.9;
+    border-color: var(--accent);
+    color: var(--accent-text);
+  }
+  .rr-signin-prompt-action:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  /* Contacts tab content stack. */
+  .rr-contacts-content {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  /* JobPicker trigger: full-width dropdown button. */
+  .rr-job-picker-wrap { display: flex; flex-direction: column; }
+  .rr-job-picker {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    text-align: left;
+  }
+  .rr-job-picker:hover { border-color: var(--text-muted); }
+  .rr-job-picker:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .rr-job-picker[aria-expanded="true"] { border-color: var(--accent); }
+  .rr-job-picker:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  .rr-job-picker::after {
+    content: '';
+    width: 0; height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 4px solid currentColor;
+    flex-shrink: 0;
+    margin-left: 8px;
+  }
+  .rr-job-picker-label {
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .rr-job-picker-placeholder { color: var(--text-muted); }
+
+  /* Entitlements subtitle bar. */
+  .rr-entitlements-bar {
+    font-size: 12px;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    min-height: 18px;
+  }
+  .rr-entitlements-upgrade {
+    font-size: 12px;
+  }
+
+  /* Inline "pick a job" hint below picker. */
+  .rr-contacts-empty {
+    padding: 32px 16px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  /* Find contacts primary action: full-width accent button. */
+  .rr-find-contacts-btn {
+    width: 100%;
+    background: var(--accent);
+    color: var(--accent-text);
+    border-color: var(--accent);
+    padding: 10px 14px;
+    margin-top: 4px;
+  }
+  .rr-find-contacts-btn:hover {
+    opacity: 0.9;
+    border-color: var(--accent);
+    color: var(--accent-text);
+  }
+  .rr-find-contacts-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  /* Inline-spinner sizing override (used inside buttons). */
+  .rr-spinner-inline {
+    width: 12px; height: 12px;
+    border-width: 1.5px;
+    display: inline-block;
+    vertical-align: -2px;
+    margin-right: 6px;
+  }
 </style>
 </head>
 <body data-state="loading">
@@ -554,7 +745,7 @@
       <div class="rr-logo" aria-hidden="true">R</div>
       <h1 class="rr-title" data-i18n="brand.name">ReplyRate</h1>
     </div>
-    <span class="rr-state-pill" id="rr-state-pill" aria-live="polite">Loading</span>
+    <div id="rr-user-menu"></div>
   </header>
 
   <main class="rr-main">

@@ -1,6 +1,8 @@
 // ReplyRate side panel.
 // Wave 0 task 4: state machine + i18n scaffold.
 // Wave 1 task 9 part 1: tab navigation shell with coming-soon states.
+// Wave 2 task 1 foundation: auth widget in header, Contacts tab scaffold,
+// entitlements display, Stripe upgrade link.
 
 const STATES = Object.freeze({
   COLLAPSED: 'collapsed',
@@ -13,6 +15,27 @@ const STATES = Object.freeze({
 const TAB_IDS = ['overview', 'contacts', 'messages', 'tracker', 'insights'];
 const DEFAULT_TAB = 'tracker';
 const STORAGE_KEY_ACTIVE_TAB = 'rr_panel_active_tab';
+
+// Wave 2 task 1: backend + Stripe URLs.
+// BACKEND_BASE_URL is hardcoded to production. Same value as background.js
+// (vanilla JS, no shared module — drift risk accepted; both files updated
+// together when the URL changes).
+const BACKEND_BASE_URL = 'https://replyrate.ai';
+
+// ⚠️ TEST MODE ONLY — must replace before public launch.
+//
+// Stripe Payment Link for the Starter tier (£29/mo). The Pro tier
+// payment link isn't surfaced in this commit's UI; only Starter is offered
+// from the Upgrade button until tiered upgrade selection lands.
+//
+// For production: replace with the live-mode payment link URL (no 'test_'
+// prefix). Live mode requires:
+//   1. Duplicate products in Stripe live mode
+//   2. Create live payment links
+//   3. Create live webhook destination at /api/stripe-webhook
+//   4. Add live STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET to Vercel env vars
+//   5. Update this constant
+const STRIPE_CHECKOUT_URL_BASE = 'https://buy.stripe.com/test_dRmaEXd3F9ra7BBc7o93y00';
 
 // Phosphor "regular flat" SVGs (sourced from local install). viewBox 0 0 256 256,
 // fill="currentColor" so colour follows the parent. Decorative wherever placed
@@ -53,10 +76,11 @@ const STRINGS = {
   },
   // Wave 1 task 9 part 1: per-tab labels and coming-soon copy. Tracker has
   // no emptyBody after part 2 because the tab now mounts the real Tracker
-  // module instead of an EmptyState placeholder.
+  // module instead of an EmptyState placeholder. Contacts no longer has
+  // emptyBody after Wave 2 task 1 (see contacts.* below).
   tabs: {
     overview: { label: 'Overview', emptyBody: 'Save a job from LinkedIn, Lever, or Indeed to start.' },
-    contacts: { label: 'Contacts', emptyBody: 'Contact discovery ships in the next update.' },
+    contacts: { label: 'Contacts' },
     messages: { label: 'Messages', emptyBody: 'Message generation ships in the next update.' },
     tracker:  { label: 'Tracker' },
     insights: { label: 'Insights', emptyBody: 'Reply rate insights ship after you start sending.' },
@@ -120,10 +144,36 @@ const STRINGS = {
       retry:   'Retry',
     },
   },
+  // Wave 2 task 1: contacts tab + auth widget copy.
+  contacts: {
+    signedOut: {
+      heading: 'Sign in to find contacts',
+      body:    "Find the right people to reach at companies you've saved. ReplyRate finds verified emails from public profiles.",
+      signIn:  'Sign in',
+    },
+    picker: {
+      placeholder: 'Pick a job from your tracker',
+      empty:       'No saved jobs yet',
+    },
+    entitlements: {
+      loading:     ' ',
+      planSuffix:  ' plan',
+      separator:   ' · ',
+      unlocksUsed: (used, limit) => used + ' / ' + limit + ' unlocks used',
+      upgrade:     'Upgrade',
+    },
+    emptyHint:    'Pick a job above to find contacts at that company.',
+    findContacts: 'Find contacts',
+  },
+  auth: {
+    signIn:       'Sign in',
+    signingIn:    'Signing in…',
+    signOut:      'Sign out',
+    signInFailed: 'Sign-in failed. Try again.',
+  },
 };
 
 const $ = (id) => document.getElementById(id);
-const pill = $('rr-state-pill');
 
 function applyI18n() {
   document.querySelectorAll('[data-i18n]').forEach((el) => {
@@ -137,8 +187,6 @@ function applyI18n() {
 function setState(next, errorMsg) {
   if (!Object.values(STATES).includes(next)) return;
   document.body.dataset.state = next;
-  const pillCopy = STRINGS.state[next] && STRINGS.state[next].pill;
-  if (pillCopy) pill.textContent = pillCopy;
   if (next === STATES.ERROR) {
     const msgEl = $('rr-error-msg');
     if (msgEl) msgEl.textContent = errorMsg || STRINGS.state.error.msg;
@@ -147,19 +195,37 @@ function setState(next, errorMsg) {
 
 async function rehydrate() {
   // Read-only probe so a broken chrome.storage.local surfaces a real error.
-  // Schema keys are rr_-prefixed per the briefing.
-  const data = await chrome.storage.local.get(['rr_user_profile', STORAGE_KEY_ACTIVE_TAB]);
+  // Schema keys are rr_-prefixed per the briefing. Wave 2 task 1: also reads
+  // rr_user_session so the panel boots straight into the right signed-in /
+  // signed-out shell without a flash.
+  const data = await chrome.storage.local.get(['rr_user_profile', 'rr_user_session', STORAGE_KEY_ACTIVE_TAB]);
   const stored = (data[STORAGE_KEY_ACTIVE_TAB] || '').toString().toLowerCase();
   const initialTab = TAB_IDS.includes(stored) ? stored : DEFAULT_TAB;
-  return { state: STATES.READY, initialTab };
+  const initialSession = data.rr_user_session || null;
+  return { state: STATES.READY, initialTab, initialSession };
 }
 
-// ── Wave 1 task 9 part 1: app state ────────────────────────────────────────
-// Tiny pub/sub holding the active tab. Persists changes to chrome.storage.local
-// fire-and-forget; UI does not block on the write.
-function createAppState(initialTab) {
+// ── Wave 1 task 9 part 1 + Wave 2 task 1: app state ────────────────────────
+// Pub/sub holding active tab (persisted), session (mirrored from
+// rr_user_session storage), entitlements (in-memory cache), and selectedJobId
+// (in-memory; persisted across panel close in a future commit).
+function createAppState(initialTab, initialSession) {
   let activeTab = TAB_IDS.includes(initialTab) ? initialTab : DEFAULT_TAB;
-  const subscribers = new Set();
+  let session = initialSession || null;
+  let entitlements = null;
+  let selectedJobId = null;
+
+  const tabSubscribers = new Set();
+  const sessionSubscribers = new Set();
+  const entitlementsSubscribers = new Set();
+  const selectedJobIdSubscribers = new Set();
+
+  function notify(set, label) {
+    set.forEach((fn) => {
+      try { fn(); } catch (e) { console.error('[panel] ' + label + ' subscriber threw', e); }
+    });
+  }
+
   return {
     getActiveTab() { return activeTab; },
     setActiveTab(next) {
@@ -168,13 +234,144 @@ function createAppState(initialTab) {
       chrome.storage.local
         .set({ [STORAGE_KEY_ACTIVE_TAB]: next })
         .catch((err) => console.warn('[panel] persist active tab failed', err));
-      subscribers.forEach((fn) => { try { fn(); } catch (e) { console.error('[panel] subscriber threw', e); } });
+      notify(tabSubscribers, 'tab');
     },
     subscribe(fn) {
-      subscribers.add(fn);
-      return () => subscribers.delete(fn);
+      tabSubscribers.add(fn);
+      return () => tabSubscribers.delete(fn);
+    },
+
+    // Session: sourced from rr_user_session in chrome.storage.local. Background
+    // SW writes; panel mirrors via the storage onChanged listener wired in
+    // boot(). Modules call subscribeSession to react to sign-in/sign-out.
+    getSession() { return session; },
+    setSession(next) {
+      session = next || null;
+      notify(sessionSubscribers, 'session');
+    },
+    subscribeSession(fn) {
+      sessionSubscribers.add(fn);
+      return () => sessionSubscribers.delete(fn);
+    },
+
+    // Entitlements: in-memory only. Modules call setEntitlements after a
+    // fetchEntitlements() roundtrip. No persistence; refetched on each
+    // mount/sign-in/tab-switch trigger.
+    getEntitlements() { return entitlements; },
+    setEntitlements(next) {
+      entitlements = next || null;
+      notify(entitlementsSubscribers, 'entitlements');
+    },
+    subscribeEntitlements(fn) {
+      entitlementsSubscribers.add(fn);
+      return () => entitlementsSubscribers.delete(fn);
+    },
+
+    // Selected job: in-memory. Spec line 12: "carries selection across tabs."
+    // Tonight's only writer is JobPicker; future Tracker row click also
+    // writes here (deferred).
+    getSelectedJobId() { return selectedJobId; },
+    setSelectedJobId(next) {
+      const v = next || null;
+      if (v === selectedJobId) return;
+      selectedJobId = v;
+      notify(selectedJobIdSubscribers, 'selectedJobId');
+    },
+    subscribeSelectedJobId(fn) {
+      selectedJobIdSubscribers.add(fn);
+      return () => selectedJobIdSubscribers.delete(fn);
     },
   };
+}
+
+// ── Wave 2 task 1: auth helpers ────────────────────────────────────────────
+// Panel-side equivalents of the background SW's signIn/signOut/rrApiFetch.
+// Differences from background.js:
+//   - rrPanelFetch (not rrApiFetch) so the two helpers don't share a name
+//     across contexts. Same Authorization-header injection, no refresh logic.
+//   - On 401, rrPanelFetch fires signOut() to bounce the user out cleanly.
+//     Closed-beta acceptable; production fix is to route panel fetches
+//     through a bg message handler that uses bg's rrApiFetch (which has
+//     full lazy + 401-retry refresh logic).
+
+async function rrPanelFetch(path, config) {
+  const data = await chrome.storage.local.get('rr_user_session');
+  const session = data.rr_user_session;
+  if (!session || !session.idToken) {
+    throw new Error('not_signed_in');
+  }
+
+  const baseConfig = config || {};
+  const headers = Object.assign({}, baseConfig.headers || {}, {
+    'Authorization': 'Bearer ' + session.idToken,
+  });
+
+  const res = await fetch(BACKEND_BASE_URL + path, Object.assign({}, baseConfig, { headers }));
+
+  if (res.status === 401) {
+    // Stale token or server-side revocation. Panel doesn't refresh; bounce
+    // to signed-out so the user re-auths cleanly. Storage event from
+    // signOut() will trigger session subscribers, re-rendering the UI.
+    console.warn('[panel] 401 from ' + path + '; bouncing to signed-out');
+    signOut().catch((err) => console.error('[panel] signOut after 401 failed', err));
+  }
+
+  return res;
+}
+
+async function signIn() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'rr_auth_signin' });
+    return res || { ok: false, error: 'no_response' };
+  } catch (err) {
+    console.error('[panel] signIn message failed:', err && err.message);
+    return { ok: false, error: 'message_failed' };
+  }
+}
+
+async function signOut() {
+  try {
+    await chrome.runtime.sendMessage({ type: 'rr_auth_signout' });
+  } catch (err) {
+    console.warn('[panel] signOut message failed:', err && err.message);
+  }
+  // Always treat as signed out client-side, even if the message failed —
+  // matches the bg's fail-open contract.
+  return { ok: true };
+}
+
+async function fetchEntitlements(state) {
+  if (!state.getSession()) {
+    state.setEntitlements(null);
+    return;
+  }
+  try {
+    const res = await rrPanelFetch('/api/user/entitlements');
+    if (!res.ok) {
+      console.warn('[panel] entitlements fetch returned ' + res.status);
+      state.setEntitlements(null);
+      return;
+    }
+    const data = await res.json();
+    if (!data || data.ok !== true) {
+      console.warn('[panel] entitlements response shape unexpected:', data && data.error);
+      state.setEntitlements(null);
+      return;
+    }
+    state.setEntitlements({
+      unlocksUsed:           data.unlocksUsed,
+      unlocksLimit:          data.unlocksLimit,
+      subscriptionStatus:    data.subscriptionStatus,
+      subscriptionExpiresAt: data.subscriptionExpiresAt,
+    });
+  } catch (err) {
+    if (err && err.message === 'not_signed_in') {
+      state.setEntitlements(null);
+      return;
+    }
+    console.warn('[panel] entitlements fetch failed:', err && err.message);
+    state.setEntitlements(null);
+  }
 }
 
 // ── Wave 1 task 9 part 1: modules ──────────────────────────────────────────
@@ -1472,6 +1669,530 @@ function Tracker(parent, state) {
 }
 // ── end Wave 1 task 9 part 2/3/4/5 ─────────────────────────────────────────
 
+// ── Wave 2 task 1: contacts + auth modules ─────────────────────────────────
+
+function UserMenu(parent, state) {
+  const root = document.createElement('div');
+  root.className = 'rr-user-menu';
+  parent.appendChild(root);
+
+  let isSigningIn = false;
+  let signInError = null;
+  let signInErrorTimer = null;
+  let menuPopup = null;
+  let docMousedownAttached = false;
+  let docKeydownAttached = false;
+
+  function clearSignInError() {
+    if (signInErrorTimer) { clearTimeout(signInErrorTimer); signInErrorTimer = null; }
+    signInError = null;
+    render();
+  }
+
+  function showSignInError(msg) {
+    signInError = msg;
+    if (signInErrorTimer) clearTimeout(signInErrorTimer);
+    signInErrorTimer = setTimeout(clearSignInError, 5000);
+    render();
+  }
+
+  function onDocMousedown(event) {
+    if (menuPopup && !menuPopup.contains(event.target) && !root.contains(event.target)) {
+      closeMenu();
+    }
+  }
+
+  function onMenuKeydown(event) {
+    if (event.key === 'Escape' && menuPopup) {
+      const trigger = root.querySelector('.rr-user-trigger');
+      closeMenu();
+      if (trigger) trigger.focus();
+    }
+  }
+
+  function attachDocListeners() {
+    if (!docMousedownAttached) { document.addEventListener('mousedown', onDocMousedown, true); docMousedownAttached = true; }
+    if (!docKeydownAttached)   { document.addEventListener('keydown', onMenuKeydown, true);    docKeydownAttached   = true; }
+  }
+  function detachDocListeners() {
+    if (docMousedownAttached) { document.removeEventListener('mousedown', onDocMousedown, true); docMousedownAttached = false; }
+    if (docKeydownAttached)   { document.removeEventListener('keydown', onMenuKeydown, true);    docKeydownAttached   = false; }
+  }
+
+  function closeMenu() {
+    if (!menuPopup) return;
+    menuPopup.remove();
+    menuPopup = null;
+    detachDocListeners();
+    const trigger = root.querySelector('.rr-user-trigger');
+    if (trigger) trigger.setAttribute('aria-expanded', 'false');
+  }
+
+  function openMenu(triggerRect) {
+    if (menuPopup) return;
+    const session = state.getSession();
+    if (!session) return;
+
+    menuPopup = document.createElement('ul');
+    menuPopup.className = 'rr-menu';
+    menuPopup.setAttribute('role', 'menu');
+    menuPopup.style.top = (triggerRect.bottom + 4) + 'px';
+    menuPopup.style.right = (window.innerWidth - triggerRect.right) + 'px';
+
+    const emailItem = document.createElement('li');
+    emailItem.className = 'rr-menuitem rr-menu-static';
+    emailItem.textContent = session.email || '(no email)';
+    menuPopup.appendChild(emailItem);
+
+    const sep = document.createElement('li');
+    sep.setAttribute('role', 'separator');
+    sep.style.borderTop = '1px solid var(--border)';
+    sep.style.margin = '4px 0';
+    menuPopup.appendChild(sep);
+
+    const signOutItem = document.createElement('li');
+    signOutItem.className = 'rr-menuitem rr-menuitem-destructive';
+    signOutItem.setAttribute('role', 'menuitem');
+    signOutItem.tabIndex = 0;
+    signOutItem.textContent = STRINGS.auth.signOut;
+    signOutItem.addEventListener('click', async () => {
+      closeMenu();
+      await signOut();
+    });
+    signOutItem.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); signOutItem.click(); }
+    });
+    menuPopup.appendChild(signOutItem);
+
+    document.body.appendChild(menuPopup);
+    attachDocListeners();
+    const trigger = root.querySelector('.rr-user-trigger');
+    if (trigger) trigger.setAttribute('aria-expanded', 'true');
+    signOutItem.focus();
+  }
+
+  async function onSignInClick() {
+    if (isSigningIn) return;
+    isSigningIn = true;
+    if (signInErrorTimer) { clearTimeout(signInErrorTimer); signInErrorTimer = null; }
+    signInError = null;
+    render();
+
+    const result = await signIn();
+    isSigningIn = false;
+
+    if (result && result.ok) {
+      // Storage event will update session subscribers. Re-render now to
+      // clear the spinner state without waiting for storage round-trip.
+      render();
+    } else if (result && result.error === 'identity_cancelled') {
+      // Silent: user dismissed the Google consent screen.
+      render();
+    } else {
+      showSignInError(STRINGS.auth.signInFailed);
+    }
+  }
+
+  function render() {
+    closeMenu();
+    root.innerHTML = '';
+    const session = state.getSession();
+
+    if (!session) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'rr-btn-secondary';
+      btn.disabled = isSigningIn;
+      if (isSigningIn) {
+        btn.innerHTML = '<span class="rr-spinner rr-spinner-inline" aria-hidden="true"></span>' + STRINGS.auth.signingIn;
+      } else {
+        btn.textContent = STRINGS.auth.signIn;
+        btn.addEventListener('click', onSignInClick);
+      }
+      root.appendChild(btn);
+
+      if (signInError) {
+        const pill = document.createElement('div');
+        pill.className = 'rr-user-error';
+        pill.setAttribute('role', 'alert');
+        pill.textContent = signInError;
+        root.appendChild(pill);
+      }
+    } else {
+      const trigger = document.createElement('button');
+      trigger.type = 'button';
+      trigger.className = 'rr-user-trigger';
+      trigger.setAttribute('aria-haspopup', 'menu');
+      trigger.setAttribute('aria-expanded', 'false');
+
+      const avatar = document.createElement('div');
+      avatar.className = 'rr-user-avatar';
+      avatar.setAttribute('aria-hidden', 'true');
+      const name = session.displayName || session.email || '?';
+      avatar.textContent = name.charAt(0).toUpperCase();
+      trigger.appendChild(avatar);
+
+      const nameEl = document.createElement('span');
+      nameEl.className = 'rr-user-name';
+      nameEl.textContent = session.displayName || session.email || 'Signed in';
+      trigger.appendChild(nameEl);
+
+      trigger.addEventListener('click', (event) => {
+        const t = event.currentTarget;
+        if (menuPopup) closeMenu();
+        else openMenu(t.getBoundingClientRect());
+      });
+      root.appendChild(trigger);
+    }
+  }
+
+  render();
+  const unsubscribeSession = state.subscribeSession(render);
+
+  return function unmount() {
+    closeMenu();
+    if (signInErrorTimer) clearTimeout(signInErrorTimer);
+    unsubscribeSession();
+    root.remove();
+  };
+}
+
+function SignInPrompt(parent) {
+  const root = document.createElement('div');
+  root.className = 'rr-empty';
+
+  const iconEl = document.createElement('div');
+  iconEl.className = 'rr-empty-icon';
+  iconEl.setAttribute('aria-hidden', 'true');
+  iconEl.innerHTML = ICONS.userCircle;
+  root.appendChild(iconEl);
+
+  const heading = document.createElement('h2');
+  heading.className = 'rr-empty-heading';
+  heading.textContent = STRINGS.contacts.signedOut.heading;
+  root.appendChild(heading);
+
+  const body = document.createElement('p');
+  body.className = 'rr-empty-body';
+  body.textContent = STRINGS.contacts.signedOut.body;
+  root.appendChild(body);
+
+  let isSigningIn = false;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'rr-btn rr-signin-prompt-action';
+  btn.textContent = STRINGS.contacts.signedOut.signIn;
+  btn.addEventListener('click', async () => {
+    if (isSigningIn) return;
+    isSigningIn = true;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="rr-spinner rr-spinner-inline" aria-hidden="true"></span>' + STRINGS.auth.signingIn;
+    const res = await signIn();
+    if (res && res.ok) {
+      // session subscriber will replace SignInPrompt with ContactsContent;
+      // no further work needed here.
+      return;
+    }
+    // Restore button. Errors surface in UserMenu's pill — Contacts intentionally
+    // doesn't double up the error message.
+    isSigningIn = false;
+    btn.disabled = false;
+    btn.textContent = STRINGS.contacts.signedOut.signIn;
+  });
+  root.appendChild(btn);
+
+  parent.appendChild(root);
+  return function unmount() { root.remove(); };
+}
+
+function ContactsEmptyHint(parent) {
+  const root = document.createElement('div');
+  root.className = 'rr-contacts-empty';
+  root.textContent = STRINGS.contacts.emptyHint;
+  parent.appendChild(root);
+  return function unmount() { root.remove(); };
+}
+
+function JobPicker(parent, state) {
+  const wrap = document.createElement('div');
+  wrap.className = 'rr-job-picker-wrap';
+  parent.appendChild(wrap);
+
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'rr-job-picker';
+  trigger.setAttribute('aria-haspopup', 'listbox');
+  trigger.setAttribute('aria-expanded', 'false');
+
+  const label = document.createElement('span');
+  label.className = 'rr-job-picker-label';
+  trigger.appendChild(label);
+  wrap.appendChild(trigger);
+
+  let jobs = [];
+  let listbox = null;
+  let unmounted = false;
+  let docMousedownAttached = false;
+  let docKeydownAttached = false;
+
+  function paintLabel() {
+    const id = state.getSelectedJobId();
+    const job = id ? jobs.find((j) => j.id === id) : null;
+    label.classList.remove('rr-job-picker-placeholder');
+    if (job) {
+      label.textContent = (job.title || '(untitled)') + (job.company ? ' · ' + job.company : '');
+    } else if (jobs.length === 0) {
+      label.textContent = STRINGS.contacts.picker.empty;
+      label.classList.add('rr-job-picker-placeholder');
+    } else {
+      label.textContent = STRINGS.contacts.picker.placeholder;
+      label.classList.add('rr-job-picker-placeholder');
+    }
+    trigger.disabled = jobs.length === 0;
+  }
+
+  async function loadJobs() {
+    const all = await chrome.storage.local.get(null);
+    jobs = Object.keys(all)
+      .filter(isJobKey)
+      .map((k) => all[k])
+      .filter((j) => j && j.id)
+      .sort((a, b) => (b.lastActionAt || 0) - (a.lastActionAt || 0));
+    if (!unmounted) paintLabel();
+  }
+  loadJobs().catch((err) => console.error('[picker] load failed', err));
+
+  function onDocMousedown(event) {
+    if (listbox && !listbox.contains(event.target) && !trigger.contains(event.target)) {
+      closeListbox();
+    }
+  }
+  function onListboxKeydown(event) {
+    if (event.key === 'Escape' && listbox) { closeListbox(); trigger.focus(); }
+  }
+  function attachDocListeners() {
+    if (!docMousedownAttached) { document.addEventListener('mousedown', onDocMousedown, true); docMousedownAttached = true; }
+    if (!docKeydownAttached)   { document.addEventListener('keydown', onListboxKeydown, true); docKeydownAttached   = true; }
+  }
+  function detachDocListeners() {
+    if (docMousedownAttached) { document.removeEventListener('mousedown', onDocMousedown, true); docMousedownAttached = false; }
+    if (docKeydownAttached)   { document.removeEventListener('keydown', onListboxKeydown, true); docKeydownAttached   = false; }
+  }
+
+  function closeListbox() {
+    if (!listbox) return;
+    listbox.remove();
+    listbox = null;
+    trigger.setAttribute('aria-expanded', 'false');
+    detachDocListeners();
+  }
+
+  function openListbox() {
+    if (listbox || jobs.length === 0) return;
+    listbox = document.createElement('ul');
+    listbox.className = 'rr-listbox';
+    listbox.setAttribute('role', 'listbox');
+    const r = trigger.getBoundingClientRect();
+    listbox.style.top = (r.bottom + 4) + 'px';
+    listbox.style.left = r.left + 'px';
+    listbox.style.width = r.width + 'px';
+    listbox.style.minWidth = '0';
+
+    const selectedId = state.getSelectedJobId();
+    jobs.forEach((job) => {
+      const opt = document.createElement('li');
+      opt.className = 'rr-option';
+      opt.setAttribute('role', 'option');
+      opt.setAttribute('aria-selected', job.id === selectedId ? 'true' : 'false');
+      opt.tabIndex = 0;
+      opt.textContent = (job.title || '(untitled)') + (job.company ? ' · ' + job.company : '');
+      opt.addEventListener('click', () => {
+        state.setSelectedJobId(job.id);
+        closeListbox();
+      });
+      opt.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); opt.click(); }
+      });
+      listbox.appendChild(opt);
+    });
+
+    document.body.appendChild(listbox);
+    trigger.setAttribute('aria-expanded', 'true');
+    attachDocListeners();
+  }
+
+  trigger.addEventListener('click', () => {
+    if (trigger.disabled) return;
+    if (listbox) closeListbox(); else openListbox();
+  });
+
+  function onStorageChanged(changes, areaName) {
+    if (areaName !== 'local' || unmounted) return;
+    let touched = false;
+    for (const key of Object.keys(changes)) {
+      if (isJobKey(key)) { touched = true; break; }
+    }
+    if (touched) loadJobs().catch((err) => console.error('[picker] reload failed', err));
+  }
+  chrome.storage.onChanged.addListener(onStorageChanged);
+  const unsubscribeJobId = state.subscribeSelectedJobId(paintLabel);
+
+  return function unmount() {
+    unmounted = true;
+    chrome.storage.onChanged.removeListener(onStorageChanged);
+    unsubscribeJobId();
+    closeListbox();
+    wrap.remove();
+  };
+}
+
+function EntitlementsBar(parent, state) {
+  const root = document.createElement('div');
+  root.className = 'rr-entitlements-bar';
+  parent.appendChild(root);
+
+  function paint() {
+    root.innerHTML = '';
+    const ent = state.getEntitlements();
+    const session = state.getSession();
+    if (!ent) {
+      root.textContent = STRINGS.contacts.entitlements.loading;
+      return;
+    }
+    const text = document.createElement('span');
+    text.textContent =
+      STRINGS.contacts.entitlements.unlocksUsed(ent.unlocksUsed, ent.unlocksLimit) +
+      STRINGS.contacts.entitlements.separator +
+      ent.subscriptionStatus +
+      STRINGS.contacts.entitlements.planSuffix;
+    root.appendChild(text);
+
+    if (ent.subscriptionStatus === 'free' && session && session.uid) {
+      const sep = document.createElement('span');
+      sep.textContent = STRINGS.contacts.entitlements.separator;
+      root.appendChild(sep);
+
+      const upgrade = document.createElement('button');
+      upgrade.type = 'button';
+      upgrade.className = 'rr-link rr-entitlements-upgrade';
+      upgrade.textContent = STRINGS.contacts.entitlements.upgrade;
+      upgrade.addEventListener('click', () => {
+        const url = STRIPE_CHECKOUT_URL_BASE + '?client_reference_id=' + encodeURIComponent(session.uid);
+        chrome.tabs.create({ url, active: true })
+          .catch((err) => console.error('[contacts] tabs.create failed', err));
+      });
+      root.appendChild(upgrade);
+    }
+  }
+  paint();
+  const unsubEnt = state.subscribeEntitlements(paint);
+  const unsubSession = state.subscribeSession(paint);
+
+  return function unmount() {
+    unsubEnt();
+    unsubSession();
+    root.remove();
+  };
+}
+
+function FindContactsButton(parent, state) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'rr-btn rr-find-contacts-btn';
+  btn.textContent = STRINGS.contacts.findContacts;
+  btn.addEventListener('click', () => {
+    const id = state.getSelectedJobId();
+    // No-op tonight — Apollo wiring lands in the next commit. Logged so the
+    // SW console shows the button is reachable end-to-end.
+    console.log('[contacts] find-contacts clicked, deferred. selectedJobId=' + id);
+  });
+  parent.appendChild(btn);
+  return function unmount() { btn.remove(); };
+}
+
+function ContactsContent(parent, state) {
+  const root = document.createElement('div');
+  root.className = 'rr-contacts-content';
+  parent.appendChild(root);
+
+  const pickerHandle = JobPicker(root, state);
+  const entitlementsHandle = EntitlementsBar(root, state);
+
+  const lowerArea = document.createElement('div');
+  root.appendChild(lowerArea);
+
+  let lowerHandle = null;
+  function renderLower() {
+    if (lowerHandle) { lowerHandle(); lowerHandle = null; }
+    const id = state.getSelectedJobId();
+    if (id) {
+      lowerHandle = FindContactsButton(lowerArea, state);
+    } else {
+      lowerHandle = ContactsEmptyHint(lowerArea);
+    }
+  }
+  renderLower();
+  const unsubscribeJobId = state.subscribeSelectedJobId(renderLower);
+
+  return function unmount() {
+    unsubscribeJobId();
+    if (lowerHandle) lowerHandle();
+    if (entitlementsHandle) entitlementsHandle();
+    if (pickerHandle) pickerHandle();
+    root.remove();
+  };
+}
+
+function Contacts(parent, state) {
+  let lastSignedIn = !!state.getSession();
+  let innerHandle = null;
+  let unmounted = false;
+
+  function mountInner() {
+    if (innerHandle) { innerHandle(); innerHandle = null; }
+    if (state.getSession()) {
+      innerHandle = ContactsContent(parent, state);
+    } else {
+      innerHandle = SignInPrompt(parent);
+    }
+  }
+  mountInner();
+
+  // Trigger entitlements fetch on initial mount when signed in.
+  if (state.getSession()) {
+    fetchEntitlements(state).catch((err) => console.error('[contacts] entitlements fetch failed', err));
+  }
+
+  function onSessionChange() {
+    if (unmounted) return;
+    const nowSignedIn = !!state.getSession();
+    if (nowSignedIn !== lastSignedIn) {
+      lastSignedIn = nowSignedIn;
+      mountInner();
+      if (nowSignedIn) {
+        fetchEntitlements(state).catch((err) => console.error('[contacts] entitlements fetch failed', err));
+      }
+    }
+  }
+  const unsubscribeSession = state.subscribeSession(onSessionChange);
+
+  function onTabChange() {
+    if (unmounted) return;
+    if (state.getActiveTab() === 'contacts' && state.getSession()) {
+      fetchEntitlements(state).catch((err) => console.error('[contacts] entitlements fetch failed', err));
+    }
+  }
+  const unsubscribeTab = state.subscribe(onTabChange);
+
+  return function unmount() {
+    unmounted = true;
+    unsubscribeSession();
+    unsubscribeTab();
+    if (innerHandle) innerHandle();
+  };
+}
+// ── end Wave 2 task 1 modules ──────────────────────────────────────────────
+
 function App(parent, state) {
   parent.innerHTML = '';
   const tabsUnmount = Tabs(parent, state);
@@ -1480,9 +2201,9 @@ function App(parent, state) {
   content.className = 'rr-tab-content';
   parent.appendChild(content);
 
-  // Mount one tabpanel per tab upfront. Tracker gets its real module; the
-  // other four show a coming-soon EmptyState. No mount/unmount churn on
-  // tab switch (visibility is toggled via the `hidden` attribute).
+  // Mount one tabpanel per tab upfront. Tracker and Contacts get their real
+  // modules; the other three show a coming-soon EmptyState. No mount/unmount
+  // churn on tab switch (visibility is toggled via the `hidden` attribute).
   const panels = TAB_IDS.map((id) => {
     const panel = document.createElement('section');
     panel.setAttribute('role', 'tabpanel');
@@ -1491,12 +2212,17 @@ function App(parent, state) {
     panel.className = 'rr-tabpanel';
     panel.dataset.tab = id;
     content.appendChild(panel);
-    const contentUnmount = id === 'tracker'
-      ? Tracker(panel, state)
-      : EmptyState(panel, {
-          icon: TAB_ICON[id],
-          body: STRINGS.tabs[id].emptyBody,
-        });
+    let contentUnmount;
+    if (id === 'tracker') {
+      contentUnmount = Tracker(panel, state);
+    } else if (id === 'contacts') {
+      contentUnmount = Contacts(panel, state);
+    } else {
+      contentUnmount = EmptyState(panel, {
+        icon: TAB_ICON[id],
+        body: STRINGS.tabs[id].emptyBody,
+      });
+    }
     return { id, panel, unmount: contentUnmount };
   });
 
@@ -1518,16 +2244,43 @@ function App(parent, state) {
 
 let appState = null;
 let appUnmount = null;
+let userMenuUnmount = null;
+
+// Wave 2 task 1: rr_user_session is the source of truth for auth state.
+// Background SW writes (signIn/signOut/refresh); panel mirrors via this
+// listener. Attached once (idempotent flag) on first boot(); persists for
+// the panel's lifetime since chrome.storage.onChanged listeners are
+// document-scoped and can't be re-added without leaks.
+let sessionStorageListenerAttached = false;
+function attachSessionStorageListener() {
+  if (sessionStorageListenerAttached) return;
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local') return;
+    if ('rr_user_session' in changes) {
+      const newValue = changes.rr_user_session.newValue || null;
+      if (appState) appState.setSession(newValue);
+    }
+  });
+  sessionStorageListenerAttached = true;
+}
 
 async function boot() {
   applyI18n();
   setState(STATES.LOADING);
   if (appUnmount) { appUnmount(); appUnmount = null; }
+  if (userMenuUnmount) { userMenuUnmount(); userMenuUnmount = null; }
   try {
-    const { state: nextState, initialTab } = await rehydrate();
-    if (!appState) appState = createAppState(initialTab);
+    const { state: nextState, initialTab, initialSession } = await rehydrate();
+    if (!appState) {
+      appState = createAppState(initialTab, initialSession);
+    } else {
+      // Retry path: re-sync session in case it changed between boots.
+      appState.setSession(initialSession);
+    }
+    attachSessionStorageListener();
     setState(nextState);
     appUnmount = App($('rr-app-root'), appState);
+    userMenuUnmount = UserMenu($('rr-user-menu'), appState);
     // Wave 0 task 7: ask the service worker to consider capturing the
     // currently-active tab. SW handles URL check, dedupe, write, and posts
     // rr_set_state back with any applicable notice.

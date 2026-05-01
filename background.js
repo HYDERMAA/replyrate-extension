@@ -56,6 +56,19 @@
 //    + clears rr_user_session. Next sign-in re-prompts the Google consent
 //    screen.
 //
+// 6. rr_save_active_tab                                    direction: sp -> bg
+//    request:  { type: 'rr_save_active_tab' }
+//    response: { ok: true, savedId, deduped, notice: 'saved' | 'already_saved' }
+//              | { ok: false, notice: 'unsupported_page' | 'not_a_job_page' | 'storage_error' }
+//    sender:   sp only.   responseStyle: async
+//    Reads the active tab via chrome.tabs.query (NOT a panel-supplied
+//    tabId — panel's tabId could race with tab navigation between message
+//    send and handler run). Detects sourceType from URL, canonicalizes,
+//    dedupes against rr_job_* keys, writes JobLead. URL-only save: title
+//    comes from tab.title, company/location stay null (matches existing
+//    capture flow's behavior; floating-button SAVE_JOB extracts those
+//    fields but doesn't forward them either).
+//
 // Future events from bg -> sp (capture_complete, save_complete, ...) go
 // through pushPanelEvent so call sites do not need to know the wire format.
 // =============================================================================
@@ -362,57 +375,40 @@ async function captureActiveTabIfEligible(tabId) {
   }
 
   const url = tab && tab.url;
-  const isLinkedIn = url && /^https:\/\/(?:www\.)?linkedin\.com\//i.test(url);
-  if (!isLinkedIn) {
-    // Non-LinkedIn tab. Other source types land in tasks 6 and 8.
+  const sourceType = detectSource(url);
+  if (!sourceType) {
+    // Non-supported tab. Boot path stays silent (no notice surfaced).
+    // The explicit Save button (rr_save_active_tab) returns 'unsupported_page'
+    // to the panel for toast feedback.
     pushPanelState('ready');
     return;
   }
 
-  const canonicalUrl = canonicalLinkedInJobUrl(url);
+  const canonicalUrl = canonicalizeUrl(sourceType, url);
   if (!canonicalUrl) {
-    // On linkedin.com but not on /jobs/view/<id>. No capture, but tell the
-    // panel why so the UI (when wired) can explain what to click instead.
-    pushPanelState('ready', null, 'rr_notice_not_a_job_page');
+    // On a supported domain but not a job posting (e.g. linkedin.com/feed,
+    // indeed.com/jobs without jk param). LinkedIn keeps its legacy
+    // 'rr_notice_not_a_job_page' broadcast for back-compat; Lever/Indeed
+    // join the silent branch (the panel doesn't render this notice in UI
+    // anyway — Wave 0 task 7 deferred notice rendering).
+    if (sourceType === 'linkedin') {
+      pushPanelState('ready', null, 'rr_notice_not_a_job_page');
+    } else {
+      pushPanelState('ready');
+    }
     return;
   }
 
-  // Linear scan over rr_job_* keys. Acceptable at v1 volumes; task 9+ will
-  // index if needed.
-  const all = await chrome.storage.local.get(null);
-  const dupeKey = Object.keys(all).find(
-    (k) => k.indexOf('rr_job_') === 0 && all[k] && all[k].sourceUrl === canonicalUrl
-  );
-
-  if (dupeKey) {
-    // Touch lastActionAt so the panel can sort by recency without changing
-    // createdAt. Skip writing a duplicate JobLead.
-    const existing = all[dupeKey];
-    existing.lastActionAt = Date.now();
-    await chrome.storage.local.set({ [dupeKey]: existing });
+  // Wave 2 task 1 follow-on: extended to all three sources via shared
+  // saveJobFromUrl helper. Boot path stays silent on success; broadcasts
+  // 'rr_notice_already_saved' on dedupe hit (legacy LinkedIn behavior
+  // preserved across all sources for symmetry).
+  const result = await saveJobFromUrl(tab, sourceType, canonicalUrl);
+  if (result.ok && result.deduped) {
     pushPanelState('ready', null, 'rr_notice_already_saved');
-    return;
+  } else {
+    pushPanelState('ready');
   }
-
-  const id = newJobLeadId();
-  const now = Date.now();
-  const jobLead = {
-    id,
-    title: tab.title || '',
-    company: null,
-    location: null,
-    sourceType: 'linkedin',
-    sourceUrl: canonicalUrl,
-    salaryText: null,
-    descriptionHash: null,
-    fitBand: null,
-    stage: 'saved',
-    createdAt: now,
-    lastActionAt: now,
-    nextActionAt: null,
-  };
-  await chrome.storage.local.set({ ['rr_job_' + id]: jobLead });
-  pushPanelState('ready');
 }
 
 // rr_set_state broadcaster. See contract block at top of file. Prefer
@@ -541,6 +537,111 @@ async function saveFromContentScript(msg) {
   return { ok: true, id };
 }
 
+// ── Wave 2 task 1 follow-on: shared save helpers ───────────────────────────
+// Used by both rr_capture_active_tab (boot auto-save, silent) and
+// rr_save_active_tab (button click, returns envelope for toast). The two
+// flows diverge in feedback only; the actual save logic is shared.
+
+// Detect which job source a URL belongs to. Returns
+// 'linkedin' | 'lever' | 'indeed' | null.
+function detectSource(url) {
+  if (!url) return null;
+  if (/^https:\/\/(?:www\.)?linkedin\.com\//i.test(url)) return 'linkedin';
+  if (/^https:\/\/(?:[a-z0-9-]+\.)?lever\.co\//i.test(url)) return 'lever';
+  if (/^https:\/\/(?:[a-z0-9-]+\.)?indeed\.com\//i.test(url)) return 'indeed';
+  return null;
+}
+
+// Pick the right canonicalizer per source. Returns canonical URL string
+// or null when the URL doesn't represent a specific job posting (e.g.,
+// LinkedIn feed page, Indeed search-results page without jk param).
+function canonicalizeUrl(sourceType, rawUrl) {
+  if (sourceType === 'linkedin') return canonicalLinkedInJobUrl(rawUrl);
+  if (sourceType === 'lever')    return canonicalLeverUrl(rawUrl);
+  if (sourceType === 'indeed')   return canonicalIndeedUrl(rawUrl);
+  return null;
+}
+
+// Shared save path. Reads all rr_job_* keys, dedupes by canonical URL,
+// either bumps lastActionAt on a hit or writes a fresh JobLead on a miss.
+// Returns { ok, savedId, deduped, notice } envelope.
+//
+// Storage write failures (rare; quota exceeded, transient errors) are
+// caught and surfaced as { ok: false, notice: 'storage_error' } so the
+// panel can show the error toast.
+//
+// Dedupe scan is O(n) over all rr_job_* keys — acceptable at closed-beta
+// scale (hundreds of jobs per user max). Future optimization: maintain a
+// URL->jobId index in chrome.storage.local for O(1) dedupe lookups.
+async function saveJobFromUrl(tab, sourceType, canonicalUrl) {
+  try {
+    const all = await chrome.storage.local.get(null);
+    const dupeKey = Object.keys(all).find(
+      (k) => k.indexOf('rr_job_') === 0 && all[k] && all[k].sourceUrl === canonicalUrl
+    );
+
+    if (dupeKey) {
+      const existing = all[dupeKey];
+      existing.lastActionAt = Date.now();
+      await chrome.storage.local.set({ [dupeKey]: existing });
+      return { ok: true, savedId: existing.id, deduped: true, notice: 'already_saved' };
+    }
+
+    const id = newJobLeadId();
+    const now = Date.now();
+    const jobLead = {
+      id,
+      title: (tab && tab.title) || '',
+      company: null,
+      location: null,
+      sourceType,
+      sourceUrl: canonicalUrl,
+      salaryText: null,
+      descriptionHash: null,
+      fitBand: null,
+      stage: 'saved',
+      createdAt: now,
+      lastActionAt: now,
+      nextActionAt: null,
+    };
+    await chrome.storage.local.set({ ['rr_job_' + id]: jobLead });
+    return { ok: true, savedId: id, deduped: false, notice: 'saved' };
+  } catch (err) {
+    console.error('[save-job] storage write failed', err);
+    return { ok: false, notice: 'storage_error' };
+  }
+}
+
+// Resolve the active tab and run the shared save path. Used by the
+// rr_save_active_tab handler (button click). Doesn't trust panel-supplied
+// tabId — queries the active tab directly to avoid races with tab
+// navigation between message send and handler run.
+async function saveActiveTab() {
+  let tab;
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    tab = tabs && tabs[0];
+  } catch (err) {
+    console.error('[save-active-tab] tabs.query failed', err);
+    return { ok: false, notice: 'storage_error' };
+  }
+  if (!tab || !tab.url) {
+    return { ok: false, notice: 'unsupported_page' };
+  }
+
+  const sourceType = detectSource(tab.url);
+  if (!sourceType) {
+    return { ok: false, notice: 'unsupported_page' };
+  }
+
+  const canonicalUrl = canonicalizeUrl(sourceType, tab.url);
+  if (!canonicalUrl) {
+    return { ok: false, notice: 'not_a_job_page' };
+  }
+
+  return saveJobFromUrl(tab, sourceType, canonicalUrl);
+}
+
 // ---- Message handlers ------------------------------------------------------
 // Each handler matches its dispatch-table responseStyle:
 //   responseStyle: 'async'    => handler must call sendResponse later via a
@@ -598,6 +699,16 @@ function handleAuthSignout(msg, sender, sendResponse) {
   );
 }
 
+function handleSaveActiveTab(msg, sender, sendResponse) {
+  saveActiveTab().then(
+    (res) => sendResponse(res),
+    (err) => {
+      console.error('[save-active-tab] threw', err);
+      sendResponse({ ok: false, notice: 'storage_error' });
+    }
+  );
+}
+
 // ---- Dispatch table --------------------------------------------------------
 // Single source of truth for "what message types do we accept and how".
 // Append a row here when adding a new type; the contract block at the top of
@@ -607,6 +718,7 @@ const MESSAGE_HANDLERS = {
   rr_capture_active_tab: { responseStyle: 'sync_ack', requiresTabSender: false, handler: handleCaptureActiveTab },
   rr_auth_signin:        { responseStyle: 'async',    requiresTabSender: false, handler: handleAuthSignin },
   rr_auth_signout:       { responseStyle: 'async',    requiresTabSender: false, handler: handleAuthSignout },
+  rr_save_active_tab:    { responseStyle: 'async',    requiresTabSender: false, handler: handleSaveActiveTab },
 };
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

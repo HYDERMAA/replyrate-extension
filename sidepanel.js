@@ -50,6 +50,8 @@ const ICONS = {
   dotsThreeVertical: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><circle cx="12" cy="6" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="18" r="2"/></svg>',
   // Wave 2 task 1 continuation: external-link icon for ContactCard's LinkedIn link.
   arrowSquareOut: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M200,64V168a8,8,0,0,1-16,0V83.31L69.66,197.66a8,8,0,0,1-11.32-11.32L172.69,72H88a8,8,0,0,1,0-16H192A8,8,0,0,1,200,64Z"/></svg>',
+  // Wave 2 task 1 follow-on: bookmark icon for the header Save-this-page button.
+  bookmarkSimple: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M184,32H72A16,16,0,0,0,56,48V224a8,8,0,0,0,12.24,6.78L128,193.43l59.77,37.35A8,8,0,0,0,200,224V48A16,16,0,0,0,184,32Zm0,177.57-51.77-32.35a8,8,0,0,0-8.48,0L72,209.57V48H184Z"/></svg>',
 };
 
 // Map tab id -> Phosphor icon. Spec table names "home" and "clipboard-list";
@@ -214,6 +216,17 @@ const STRINGS = {
     signingIn:    'Signing in…',
     signOut:      'Sign out',
     signInFailed: 'Sign-in failed. Try again.',
+  },
+  // Wave 2 task 1 follow-on: Save-this-page button.
+  save: {
+    tooltip: 'Save this page',
+    toast: {
+      saved:        'Job saved',
+      alreadySaved: 'Already saved',
+      unsupported:  'Not a supported job page',
+      notJobPage:   'Open a job posting to save it',
+      error:        "Couldn't save. Try again.",
+    },
   },
 };
 
@@ -1458,7 +1471,32 @@ function ConfirmDialog(parent, options) {
 // onAction; dismissNow cancels timer + removes DOM without firing either
 // callback (used when a new toast replaces this one OR when Tracker
 // unmounts mid-toast).
-function Toast(parent, options) {
+// Wave 2 task 1 follow-on: panel-global toast singleton.
+//
+// Was: Toast(parent, options) mounted into a Tracker-owned parent. Tracker
+// tracked its own currentToastHandle and called dismissNow on replacement
+// + unmount. Now: any module calls showToast(options); the singleton
+// guarantees only one toast is visible at a time. Newest replaces oldest
+// via dismissNow, which does NOT fire onAction or onAutoDismiss callbacks
+// (replacement is not cancellation — preserves Tracker's existing semantic).
+//
+// options:
+//   body          string (required)
+//   actionLabel   string (optional; if present, renders a clickable action
+//                 button that fires onAction)
+//   onAction      function (optional; fired on action button click)
+//   onAutoDismiss function (optional; fired when duration elapses with no click)
+//   duration      number (optional; default 3000ms; Tracker passes 5000)
+
+let _currentToastHandle = null;
+
+function showToast(options) {
+  if (_currentToastHandle) _currentToastHandle.dismissNow();
+  _currentToastHandle = mountToast(options);
+  return _currentToastHandle;
+}
+
+function mountToast(options) {
   const root = document.createElement('div');
   root.className = 'rr-toast';
   root.setAttribute('role', 'status');
@@ -1469,44 +1507,54 @@ function Toast(parent, options) {
   body.textContent = options.body;
   root.appendChild(body);
 
-  const action = document.createElement('button');
-  action.type = 'button';
-  action.className = 'rr-toast-action';
-  action.textContent = options.actionLabel;
-  root.appendChild(action);
+  let action = null;
+  if (options.actionLabel) {
+    action = document.createElement('button');
+    action.type = 'button';
+    action.className = 'rr-toast-action';
+    action.textContent = options.actionLabel;
+    root.appendChild(action);
+  }
 
-  parent.appendChild(root);
+  document.body.appendChild(root);
 
   let consumed = false;
-  const duration = options.duration || 5000;
+  const duration = options.duration || 3000;
+  const handle = { unmount: dismissNow, dismissNow };
+
   const timer = setTimeout(() => {
     if (consumed) return;
     consumed = true;
     if (root.parentNode) root.remove();
+    if (_currentToastHandle === handle) _currentToastHandle = null;
     if (options.onAutoDismiss) options.onAutoDismiss();
   }, duration);
 
-  action.addEventListener('click', () => {
-    if (consumed) return;
-    // Order matters: clear the timer FIRST so it can't race with the click,
-    // then mark consumed, then DOM removal, then user callback.
-    clearTimeout(timer);
-    consumed = true;
-    if (root.parentNode) root.remove();
-    if (options.onAction) options.onAction();
-  });
+  if (action) {
+    action.addEventListener('click', () => {
+      if (consumed) return;
+      // Order matters: clear the timer FIRST so it can't race with the click,
+      // then mark consumed, then DOM removal, then user callback.
+      clearTimeout(timer);
+      consumed = true;
+      if (root.parentNode) root.remove();
+      if (_currentToastHandle === handle) _currentToastHandle = null;
+      if (options.onAction) options.onAction();
+    });
+  }
 
   function dismissNow() {
     if (consumed) return;
     clearTimeout(timer);
     consumed = true;
     if (root.parentNode) root.remove();
+    if (_currentToastHandle === handle) _currentToastHandle = null;
     // Note: dismissNow does NOT fire onAction or onAutoDismiss. It's used
     // for replacement (caller has already handled "what happens to the
     // pending action") and for Tracker unmount cleanup.
   }
 
-  return { unmount: dismissNow, dismissNow };
+  return handle;
 }
 
 // ErrorState: initial-load failure surface with Retry. Replaces the
@@ -1567,12 +1615,17 @@ function Tracker(parent, state) {
   let skeleton = null;
   let errorHandle = null;
   let currentDialogHandle = null;
-  let currentToastHandle = null;
+  // Toast is now panel-global (showToast helper) — Tracker no longer tracks
+  // its own currentToastHandle. Singleton replacement is handled by the
+  // helper itself, so a Save-button click while a delete-undo toast is
+  // showing will dismiss the undo toast (without firing onAutoDismiss; the
+  // user loses the undo affordance, but delete is permanent either way).
   // Ids restored via Undo. onStorageChanged consults this set so the restored
   // row does NOT flash like a fresh capture. One-shot per id.
   const recentlyRestoredIds = new Set();
-  // Portal mount target for ConfirmDialog and Toast. document.body is the
-  // panel's root in chrome.sidePanel context.
+  // Portal mount target for ConfirmDialog. document.body is the panel's
+  // root in chrome.sidePanel context. Toasts use document.body via the
+  // panel-global showToast helper.
   const panelRoot = document.body;
 
   function jobsArrayFromMap() {
@@ -1664,13 +1717,11 @@ function Tracker(parent, state) {
   }
 
   function showDeleteToast(key, deletedValue) {
-    if (currentToastHandle) currentToastHandle.dismissNow();
-    currentToastHandle = Toast(panelRoot, {
+    showToast({
       body:        STRINGS.tracker.toast.deleted,
       actionLabel: STRINGS.tracker.toast.undo,
       duration:    5000,
       onAction: () => {
-        currentToastHandle = null;
         // Mark the id so the upcoming storage event doesn't flash the row.
         recentlyRestoredIds.add(deletedValue.id);
         chrome.storage.local.set({ [key]: deletedValue }).catch((err) => {
@@ -1679,7 +1730,6 @@ function Tracker(parent, state) {
         });
       },
       onAutoDismiss: () => {
-        currentToastHandle = null;
         // Delete is now permanent. Storage was already cleared at delete time;
         // there is no further action.
       },
@@ -1805,9 +1855,11 @@ function Tracker(parent, state) {
   return function unmount() {
     unmounted = true;
     if (listenerAttached) chrome.storage.onChanged.removeListener(onStorageChanged);
-    // E1/E2/E3: tear down any open dialog or toast on Tracker unmount.
+    // E1/E2: tear down any open dialog on Tracker unmount. (Toast cleanup
+    // now lives in the panel-global showToast helper; an active toast may
+    // briefly outlive Tracker on App-level unmount but its auto-dismiss
+    // timer cleans it up shortly after — acceptable.)
     if (currentDialogHandle) { currentDialogHandle.unmount(); currentDialogHandle = null; }
-    if (currentToastHandle) { currentToastHandle.dismissNow(); currentToastHandle = null; }
     if (errorHandle) { errorHandle.unmount(); errorHandle = null; }
     if (stripHandle) stripHandle.unmount();
     teardownCurrentListHandle();
@@ -2937,9 +2989,60 @@ function App(parent, state) {
 }
 // ── end Wave 1 task 9 part 1 (modules) ─────────────────────────────────────
 
+// ── Wave 2 task 1 follow-on: Save-this-page header button ──────────────────
+// Stateless module — doesn't subscribe to appState. Click sends
+// rr_save_active_tab; awaits the {ok, notice} envelope; fires showToast
+// with the appropriate copy. Disabled while the round-trip is pending.
+function SaveActiveTabButton(parent) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'rr-save-active-btn';
+  btn.title = STRINGS.save.tooltip;
+  btn.setAttribute('aria-label', STRINGS.save.tooltip);
+  btn.innerHTML = ICONS.bookmarkSimple;
+
+  let isPending = false;
+
+  function noticeToCopy(notice) {
+    if (notice === 'saved')             return STRINGS.save.toast.saved;
+    if (notice === 'already_saved')     return STRINGS.save.toast.alreadySaved;
+    if (notice === 'unsupported_page')  return STRINGS.save.toast.unsupported;
+    if (notice === 'not_a_job_page')    return STRINGS.save.toast.notJobPage;
+    return STRINGS.save.toast.error; // 'storage_error' or anything unrecognized
+  }
+
+  async function onClick() {
+    if (isPending) return;
+    isPending = true;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="rr-spinner rr-spinner-inline" aria-hidden="true"></span>';
+    try {
+      const res = await chrome.runtime.sendMessage({ type: 'rr_save_active_tab' });
+      const notice = res && res.notice;
+      showToast({ body: noticeToCopy(notice), duration: 3000 });
+    } catch (err) {
+      console.error('[panel] save-active-tab message failed', err);
+      showToast({ body: STRINGS.save.toast.error, duration: 3000 });
+    } finally {
+      isPending = false;
+      btn.disabled = false;
+      btn.innerHTML = ICONS.bookmarkSimple;
+    }
+  }
+
+  btn.addEventListener('click', onClick);
+  parent.appendChild(btn);
+
+  return function unmount() {
+    btn.removeEventListener('click', onClick);
+    btn.remove();
+  };
+}
+
 let appState = null;
 let appUnmount = null;
 let userMenuUnmount = null;
+let saveActiveTabUnmount = null;
 
 // Wave 2 task 1: rr_user_session is the source of truth for auth state.
 // Background SW writes (signIn/signOut/refresh); panel mirrors via this
@@ -2964,6 +3067,7 @@ async function boot() {
   setState(STATES.LOADING);
   if (appUnmount) { appUnmount(); appUnmount = null; }
   if (userMenuUnmount) { userMenuUnmount(); userMenuUnmount = null; }
+  if (saveActiveTabUnmount) { saveActiveTabUnmount(); saveActiveTabUnmount = null; }
   try {
     const { state: nextState, initialTab, initialSession } = await rehydrate();
     if (!appState) {
@@ -2976,6 +3080,7 @@ async function boot() {
     setState(nextState);
     appUnmount = App($('rr-app-root'), appState);
     userMenuUnmount = UserMenu($('rr-user-menu'), appState);
+    saveActiveTabUnmount = SaveActiveTabButton($('rr-save-active-tab-slot'));
     // Wave 0 task 7: ask the service worker to consider capturing the
     // currently-active tab. SW handles URL check, dedupe, write, and posts
     // rr_set_state back with any applicable notice.

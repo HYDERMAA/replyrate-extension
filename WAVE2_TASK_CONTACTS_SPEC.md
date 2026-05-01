@@ -98,9 +98,15 @@ Cache key: `rr_contacts_<jobId>` with `{ fetchedAt, contacts }`. On Contacts tab
 
 People change roles slowly. 7 days is a reasonable freshness window; instant UX on revisit beats fresh-but-slow.
 
-### Free tier 5 lifetime unlocks, Starter $29/mo unlimited
+### Free tier 5 lifetime unlocks, paid tiers unlimited (closed-beta policy)
 
-5 lifetime unlocks lets a user feel the product on 1-2 jobs without paying. Beyond that, the existing replyrate.ai Starter tier ($29/mo) unlocks unlimited contact reveals. Pricing is enforced server-side via Firestore (`unlock_count`, `subscription_status`); client-side `rr_user_unlocks` is a UI hint only and trusts the server.
+5 lifetime unlocks lets a user feel the product on 1-2 jobs without paying. Beyond that, paid tiers (Starter £29/mo, Pro £79/mo) get unlimited contact reveals — Apollo per-credit cost is absorbed by us at closed-beta scale.
+
+Implementation: `api/stripe-webhook.js` writes `unlocksLimit: -1` for paid tiers as a sentinel meaning "unlimited"; `api/contact-unlock.js`'s cap check short-circuits for any `subscriptionStatus !== 'free'` (the limit value isn't gating-relevant for paid users, only for free); extension `EntitlementsBar` reads the -1 sentinel and renders "{used} unlocks" without a denominator.
+
+Free tier (`unlocksLimit: 5`) is still enforced server-side. A free user clearing `chrome.storage.local` does NOT reset their counter — the DB is authoritative.
+
+**This policy may change at public launch** based on observed usage patterns. Future task: add a soft monthly safety rail (alerting only, no hard block) at ~500/month per paid user once user count grows enough that outlier monitoring is meaningful. The Apollo Basic plan provides 2,500 credits/month; a single power user >500/month would be worth investigating, but the response would be a conversation rather than a hard cap.
 
 Stripe checkout reuses the existing replyrate.ai checkout flow. Post-purchase, the extension polls `/api/user/entitlements` once on next Contacts render to refresh the local `rr_user_session.subscriptionStatus`.
 

@@ -161,7 +161,12 @@ const STRINGS = {
       loading:     ' ',
       planSuffix:  ' plan',
       separator:   ' · ',
-      unlocksUsed: (used, limit) => used + ' / ' + limit + ' unlocks used',
+      // -1 limit means unlimited (paid tier per closed-beta policy). Render
+      // "{used} unlocks" without the slash/limit. See web-app stripe-webhook.js
+      // PRICE_TO_TIER for the sentinel definition.
+      unlocksUsed: (used, limit) => limit === -1
+        ? used + ' unlocks'
+        : used + ' / ' + limit + ' unlocks used',
       upgrade:     'Upgrade',
     },
     emptyHint:    'Pick a job above to find contacts at that company.',

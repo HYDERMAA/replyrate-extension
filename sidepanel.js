@@ -967,16 +967,15 @@ function JobRow(parent, jobLead, options) {
     onDelete:       () => { if (options.onDelete) options.onDelete(jobLead, overflow.triggerEl); },
   });
 
-  function openOriginal() {
-    if (!jobLead.sourceUrl) return;
-    chrome.tabs.create({ url: jobLead.sourceUrl, active: true })
-      .catch((err) => console.warn('[tracker] open original failed', err));
+  function navigate() {
+    if (options.onNavigateToContacts) options.onNavigateToContacts(jobLead.id);
   }
   function onClick(event) {
     // Trigger button clicks stop propagation in their own handlers, so any
-    // click that reaches the row root is on row body (open URL).
+    // click that reaches the row root is on row body (deep link to Contacts).
+    // "Open original" lives in the overflow menu now.
     if (event.defaultPrevented) return;
-    openOriginal();
+    navigate();
   }
   function onKeydown(event) {
     // Only act on Enter when the key event originated on the row itself,
@@ -985,7 +984,7 @@ function JobRow(parent, jobLead, options) {
     if (event.target !== root) return;
     if (event.key === 'Enter') {
       event.preventDefault();
-      openOriginal();
+      navigate();
     }
   }
   root.addEventListener('click', onClick);
@@ -1034,9 +1033,10 @@ function JobList(parent, state, initialEntries, initialNewIds, options) {
     rows = entries.map((j) => {
       const r = JobRow(list, j, {
         isNew: !!(newIds && newIds.has(j.id)),
-        onStageChange:  options.onStageChange,
-        onDelete:       options.onDelete,
-        onOpenOriginal: options.onOpenOriginal,
+        onStageChange:        options.onStageChange,
+        onDelete:             options.onDelete,
+        onOpenOriginal:       options.onOpenOriginal,
+        onNavigateToContacts: options.onNavigateToContacts,
       });
       rowsByJobId.set(j.id, r);
       return r;
@@ -1688,6 +1688,15 @@ function Tracker(parent, state) {
       .catch((e) => console.warn('[tracker] open original failed', e));
   }
 
+  // Tracker -> Contacts deep link. Row click writes selectedJobId then
+  // switches active tab; ContactsContent's subscribeSelectedJobId reruns
+  // its cache state machine (ContactList for fresh cache, SearchForm
+  // pre-filled from JobLead title/company otherwise).
+  function navigateToContacts(jobId) {
+    state.setSelectedJobId(jobId);
+    state.setActiveTab('contacts');
+  }
+
   function trackerDeleteFlow(jobLead, returnFocusTo) {
     if (currentDialogHandle) currentDialogHandle.unmount();
     currentDialogHandle = ConfirmDialog(panelRoot, {
@@ -1768,9 +1777,10 @@ function Tracker(parent, state) {
       } else { // 'list'
         const filteredNewIds = filterNewIds(newlyAddedIds, filtered);
         listHandle = JobList(parent, state, filtered, filteredNewIds, {
-          onStageChange:  commitStageChange,
-          onDelete:       trackerDeleteFlow,
-          onOpenOriginal: openOriginal,
+          onStageChange:        commitStageChange,
+          onDelete:             trackerDeleteFlow,
+          onOpenOriginal:       openOriginal,
+          onNavigateToContacts: navigateToContacts,
         });
         displayedFilterLabel = null;
       }
@@ -2858,14 +2868,20 @@ function ContactsContent(parent, state) {
     if (cache && !isStaleCache(cache)) {
       mountList(cache);
     } else {
-      // No cache, or stale. Pre-fill form from the JobLead title parser.
+      // No cache, or stale. Pre-fill form from the JobLead title parser
+      // and the directly-extracted JobLead.company. Post-74f2629 LinkedIn
+      // saves store title as just the role with no separator, so
+      // parseJobTitle returns position-only with empty company; the
+      // DOM-extracted JobLead.company fills that gap.
       let parsed = { company: '', position: '' };
+      let job = null;
       try {
-        const job = await getJobLeadById(id);
+        job = await getJobLeadById(id);
         if (job && job.title) parsed = parseJobTitle(job.title);
       } catch (err) {
         console.error('[contacts] job read failed', err);
       }
+      if (job && job.company && !parsed.company) parsed.company = job.company;
       if (unmounted || id !== state.getSelectedJobId()) return;
       mountSearchForm(parsed);
     }

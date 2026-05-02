@@ -363,6 +363,56 @@ function canonicalLinkedInJobUrl(rawUrl) {
   return 'https://www.linkedin.com/jobs/view/' + id + '/';
 }
 
+// Extract role/company/location from a live LinkedIn job page via
+// chrome.scripting.executeScript. LinkedIn's tab.title is unreliable
+// ('(N) Top job picks for you | LinkedIn' when notification badges are
+// showing) so we read the DOM directly. Multi-candidate selector chains
+// because LinkedIn rotates classes every ~6-12 months. Returns
+// { role, company, location } with each field nullable, or null on
+// executeScript failure (tab closed mid-save, URL changed, etc.).
+async function extractLinkedInJobDom(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        function pick(selectors) {
+          for (const sel of selectors) {
+            const el = document.querySelector(sel);
+            const text = el && el.textContent && el.textContent.trim();
+            if (text) return text;
+          }
+          return null;
+        }
+        return {
+          role: pick([
+            '.job-details-jobs-unified-top-card__job-title h1',
+            '.job-details-jobs-unified-top-card__job-title',
+            'h1.top-card-layout__title',
+            'h1.topcard__title',
+          ]),
+          company: pick([
+            '.job-details-jobs-unified-top-card__company-name a',
+            '.job-details-jobs-unified-top-card__company-name',
+            'a.topcard__org-name-link',
+            '.topcard__org-name-link',
+          ]),
+          location: pick([
+            '.job-details-jobs-unified-top-card__primary-description-container .tvm__text',
+            '.job-details-jobs-unified-top-card__bullet',
+            '.topcard__flavor--bullet',
+          ]),
+        };
+      },
+    });
+    const data = results && results[0] && results[0].result;
+    if (!data) return null;
+    return data;
+  } catch (err) {
+    console.warn('[save-job] LinkedIn DOM extraction failed', err && err.message);
+    return null;
+  }
+}
+
 async function captureActiveTabIfEligible(tabId) {
   if (tabId == null) { pushPanelState('ready'); return; }
 
@@ -587,13 +637,29 @@ async function saveJobFromUrl(tab, sourceType, canonicalUrl) {
       return { ok: true, savedId: existing.id, deduped: true, notice: 'already_saved' };
     }
 
+    // Wave 2 task 1 follow-on: extract role/company/location from LinkedIn
+    // DOM. LinkedIn's tab.title is unreliable ('(N) Top job picks for you
+    // | LinkedIn' when notification badges are showing) so we inject a
+    // small extractor into the live tab. Lever/Indeed keep URL-only saves;
+    // their titles are usable enough for parseJobTitle in the Contacts
+    // SearchForm. Strict improvement: if extraction returns null or all
+    // selectors miss (login wall, slow load, LinkedIn redesign), falls
+    // back to tab.title — current behavior. Dedupe path above is
+    // unchanged: re-saving an existing job still just bumps lastActionAt
+    // without re-extracting, so good captured data isn't overwritten if
+    // LinkedIn later redesigns selectors.
+    let extracted = null;
+    if (sourceType === 'linkedin' && tab && tab.id != null) {
+      extracted = await extractLinkedInJobDom(tab.id);
+    }
+
     const id = newJobLeadId();
     const now = Date.now();
     const jobLead = {
       id,
-      title: (tab && tab.title) || '',
-      company: null,
-      location: null,
+      title: (extracted && extracted.role) || (tab && tab.title) || '',
+      company: (extracted && extracted.company) || null,
+      location: (extracted && extracted.location) || null,
       sourceType,
       sourceUrl: canonicalUrl,
       salaryText: null,
